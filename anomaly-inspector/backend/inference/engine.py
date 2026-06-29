@@ -104,16 +104,29 @@ def _load_openvino(model_bytes: bytes) -> object:
     return compiled
 
 
+def _parse_spatial_dim(d, fallback: int = 256) -> int:
+    """Return a concrete spatial dimension; use fallback for symbolic/dynamic dims."""
+    try:
+        v = int(d)
+        return v if v > 0 else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _get_onnx_meta(session) -> tuple[str, tuple[int, int]]:
     meta = session.get_inputs()[0]
     shape = meta.shape
-    return meta.name, (int(shape[2]), int(shape[3]))
+    h, w = _parse_spatial_dim(shape[2]), _parse_spatial_dim(shape[3])
+    if shape[2] != h or shape[3] != w:
+        logger.info("Model has dynamic spatial dims (%s, %s); using %dx%d fallback", shape[2], shape[3], h, w)
+    return meta.name, (h, w)
 
 
 def _get_openvino_meta(compiled_model) -> tuple[str, tuple[int, int]]:
     inp = compiled_model.input(0)
     shape = inp.shape
-    return inp.any_name, (int(shape[2]), int(shape[3]))
+    h, w = _parse_spatial_dim(shape[2]), _parse_spatial_dim(shape[3])
+    return inp.any_name, (h, w)
 
 
 def _run_onnx(session, input_name: str, tensor: np.ndarray) -> tuple[np.ndarray, float]:
