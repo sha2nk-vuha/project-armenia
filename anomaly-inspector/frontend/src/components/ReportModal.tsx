@@ -71,7 +71,7 @@ export function ReportModal() {
             <Label>Start Date</Label>
             <DatePicker
               selected={startDate}
-              onChange={(d) => setStartDate(d)}
+              onChange={(d: Date | null) => setStartDate(d)}
               dateFormat="yyyy-MM-dd"
               placeholderText="Select start date"
               className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -82,7 +82,7 @@ export function ReportModal() {
             <Label>End Date</Label>
             <DatePicker
               selected={endDate}
-              onChange={(d) => setEndDate(d)}
+              onChange={(d: Date | null) => setEndDate(d)}
               dateFormat="yyyy-MM-dd"
               placeholderText="Select end date"
               minDate={startDate ?? undefined}

@@ -1,5 +1,3 @@
-import { cn } from "../lib/utils";
-
 interface ImagePanelProps {
   src: string | null;
   label: string;

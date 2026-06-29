@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Settings } from "lucide-react";
-import { api, LoadModelResponse } from "../api/client";
+import { api, type LoadModelResponse } from "../api/client";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";

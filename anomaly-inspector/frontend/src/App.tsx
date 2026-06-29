@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { ScanLine } from "lucide-react";
-import { api, InferResponse, StatsResponse, LoadModelResponse } from "./api/client";
+import { api, type InferResponse, type StatsResponse, type LoadModelResponse } from "./api/client";
 import { SettingsModal } from "./components/SettingsModal";
 import { ReportModal } from "./components/ReportModal";
 import { InferencePanel } from "./components/InferencePanel";

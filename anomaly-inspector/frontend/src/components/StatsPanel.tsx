@@ -1,4 +1,4 @@
-import { StatsResponse } from "../api/client";
+import type { StatsResponse } from "../api/client";
 
 interface StatCardProps {
   label: string;
