@@ -56,8 +56,8 @@ def _select_runtime(model_bytes: bytes) -> tuple[object, str]:
     try:
         session = _load_openvino(model_bytes)
         return session, "openvino"
-    except (ImportError, ModuleNotFoundError) as e:
-        logger.warning("OpenVINO unavailable, falling back to ONNX CPU: %s", e)
+    except Exception as e:
+        logger.warning("OpenVINO runtime unavailable: %s — falling back to CPU", e)
 
     # 3. CPU
     return _load_onnx_session(model_bytes, ["CPUExecutionProvider"]), "cpu"

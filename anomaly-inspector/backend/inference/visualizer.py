@@ -8,7 +8,7 @@ def generate_heatmap(
     """
     anomaly_map: float32 [1,1,H,W] or [H,W]
     original_rgb: uint8 [H,W,3]
-    Returns PNG bytes of jet-coloured heatmap blended over the original.
+    Returns JPEG bytes of jet-coloured heatmap blended over the original.
     """
     amap = anomaly_map.squeeze().astype(np.float32)
 
@@ -36,7 +36,7 @@ def generate_segmentation(
     anomaly_map: float32 [1,1,H,W] or [H,W]
     original_rgb: uint8 [H,W,3]
     threshold: float in [0,1]; anomaly_map is normalised to [0,1] before comparison.
-    Returns PNG bytes of original with red contour + semi-transparent defect overlay.
+    Returns JPEG bytes of original with red contour + semi-transparent defect overlay.
     """
     amap = anomaly_map.squeeze().astype(np.float32)
 
@@ -49,7 +49,7 @@ def generate_segmentation(
     h, w = original_rgb.shape[:2]
     amap_resized = cv2.resize(amap_norm.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
 
-    mask = (amap_resized > threshold).astype(np.uint8) * 255
+    mask = (amap_resized > 0.5).astype(np.uint8) * 255
 
     result_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
     overlay = result_bgr.copy()

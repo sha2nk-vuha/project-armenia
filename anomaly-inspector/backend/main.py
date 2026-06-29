@@ -1,6 +1,6 @@
 import base64
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,8 +75,18 @@ async def infer(
         raise HTTPException(status_code=400, detail="No model loaded. Load a model first.")
 
     image_bytes = await image.read()
-    tensor, original_rgb = preprocess(image_bytes, sess.input_shape)
-    anomaly_map, pred_score = engine.run_inference(tensor)
+    try:
+        tensor, original_rgb = preprocess(image_bytes, sess.input_shape)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or unsupported image file.")
+
+    try:
+        anomaly_map, pred_score = engine.run_inference(tensor)
+    except (IndexError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="Model output format unexpected. Expected anomaly_map at index 0 and pred_score at index 1.",
+        )
 
     verdict = "ok" if pred_score < threshold else "not_ok"
 
@@ -115,7 +125,7 @@ def get_report(
 ):
     try:
         start = datetime.fromisoformat(start_date)
-        end = datetime.fromisoformat(end_date)
+        end = datetime.fromisoformat(end_date) + timedelta(days=1) - timedelta(microseconds=1)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601.")
 
