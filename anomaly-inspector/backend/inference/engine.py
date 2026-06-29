@@ -27,13 +27,11 @@ def get_session() -> ModelSession | None:
 def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
     global _current_session
 
-    if filename.endswith(".xml"):
-        session = _load_openvino(model_bytes)
-        runtime = "openvino"
-        input_name, input_shape = _get_openvino_meta(session)
-    else:
-        session, runtime = _load_onnx(model_bytes)
-        input_name, input_shape = _get_onnx_meta(session)
+    if not filename.endswith(".onnx"):
+        raise ValueError(f"Only .onnx files are accepted; got: {filename!r}")
+
+    session, runtime = _select_runtime(model_bytes)
+    input_name, input_shape = _get_onnx_meta(session) if runtime != "openvino" else _get_openvino_meta(session)
 
     _current_session = ModelSession(
         session=session,
@@ -44,6 +42,25 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
     )
     logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
     return _current_session
+
+
+def _select_runtime(model_bytes: bytes) -> tuple[object, str]:
+    """Try CUDA → OpenVINO → CPU in priority order."""
+    import onnxruntime as ort
+
+    # 1. CUDA
+    if "CUDAExecutionProvider" in ort.get_available_providers():
+        return _load_onnx_session(model_bytes, ["CUDAExecutionProvider", "CPUExecutionProvider"]), "cuda"
+
+    # 2. OpenVINO
+    try:
+        session = _load_openvino(model_bytes)
+        return session, "openvino"
+    except (ImportError, ModuleNotFoundError) as e:
+        logger.warning("OpenVINO unavailable, falling back to ONNX CPU: %s", e)
+
+    # 3. CPU
+    return _load_onnx_session(model_bytes, ["CPUExecutionProvider"]), "cpu"
 
 
 def run_inference(tensor: np.ndarray) -> tuple[np.ndarray, float]:
@@ -59,31 +76,20 @@ def run_inference(tensor: np.ndarray) -> tuple[np.ndarray, float]:
 
 # ── Private helpers ──────────────────────────────────────────────────────────
 
-def _load_onnx(model_bytes: bytes) -> tuple[object, str]:
+def _load_onnx_session(model_bytes: bytes, providers: list[str]) -> object:
     import onnxruntime as ort
-
-    providers: list[str]
-    available = ort.get_available_providers()
-    if "CUDAExecutionProvider" in available:
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        runtime = "cuda"
-    else:
-        providers = ["CPUExecutionProvider"]
-        runtime = "cpu"
 
     with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
         f.write(model_bytes)
         tmp_path = f.name
     try:
-        session = ort.InferenceSession(tmp_path, providers=providers)
+        return ort.InferenceSession(tmp_path, providers=providers)
     finally:
         os.unlink(tmp_path)
 
-    return session, runtime
-
 
 def _load_openvino(model_bytes: bytes) -> object:
-    from openvino.runtime import Core
+    from openvino.runtime import Core  # raises ImportError/ModuleNotFoundError if unavailable
 
     core = Core()
     with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:

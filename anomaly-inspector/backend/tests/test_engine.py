@@ -28,15 +28,14 @@ def test_get_session_returns_none_before_load():
     assert get_session() is None
 
 
-def test_load_model_sets_session(tmp_path):
-    fake_onnx = tmp_path / "model.onnx"
-    fake_onnx.write_bytes(b"fake")
-
+def test_load_model_sets_session():
     mock_session = _make_mock_onnx_session()
-
-    with patch("inference.engine._load_onnx", return_value=(mock_session, "cpu")):
-        result = engine_module.load_model(b"fake", "model.onnx", "v1.0-test")
-
+    with patch("inference.engine._load_onnx_session", return_value=mock_session):
+        with patch("inference.engine._get_onnx_meta", return_value=("input", (256, 256))):
+            with patch("inference.engine._load_openvino", side_effect=ImportError):
+                import onnxruntime as ort
+                with patch.object(ort, "get_available_providers", return_value=["CPUExecutionProvider"]):
+                    result = engine_module.load_model(b"fake", "model.onnx", "v1.0-test")
     assert get_session() is not None
     assert result.model_version == "v1.0-test"
     assert result.runtime == "cpu"
@@ -68,7 +67,38 @@ def test_run_inference_raises_when_no_model_loaded():
 
 def test_load_model_replaces_existing_session():
     mock_session = _make_mock_onnx_session()
-    with patch("inference.engine._load_onnx", return_value=(mock_session, "cpu")):
-        engine_module.load_model(b"fake", "model.onnx", "v1.0")
-        engine_module.load_model(b"fake", "model.onnx", "v2.0")
+    with patch("inference.engine._load_onnx_session", return_value=mock_session):
+        with patch("inference.engine._get_onnx_meta", return_value=("input", (256, 256))):
+            with patch("inference.engine._load_openvino", side_effect=ImportError):
+                import onnxruntime as ort
+                with patch.object(ort, "get_available_providers", return_value=["CPUExecutionProvider"]):
+                    engine_module.load_model(b"fake", "model.onnx", "v1.0")
+                    engine_module.load_model(b"fake", "model.onnx", "v2.0")
     assert get_session().model_version == "v2.0"
+
+
+def test_load_model_rejects_non_onnx():
+    with pytest.raises(ValueError, match="Only .onnx files"):
+        engine_module.load_model(b"fake", "model.xml", "v1.0")
+
+
+def test_load_model_falls_back_to_cpu_when_openvino_unavailable():
+    mock_session = _make_mock_onnx_session()
+    with patch("inference.engine._load_openvino", side_effect=ImportError("no openvino")):
+        with patch("inference.engine._load_onnx_session", return_value=mock_session) as mock_load:
+            with patch("inference.engine._get_onnx_meta", return_value=("input", (256, 256))):
+                import onnxruntime as ort
+                with patch.object(ort, "get_available_providers", return_value=["CPUExecutionProvider"]):
+                    result = engine_module.load_model(b"fake", "model.onnx", "v1.0")
+    assert result.runtime == "cpu"
+
+
+def test_load_model_uses_openvino_when_no_cuda():
+    mock_ov_session = MagicMock()
+    with patch("inference.engine._load_openvino", return_value=mock_ov_session):
+        with patch("inference.engine._get_openvino_meta", return_value=("input", (256, 256))):
+            import onnxruntime as ort
+            with patch.object(ort, "get_available_providers", return_value=["CPUExecutionProvider"]):
+                result = engine_module.load_model(b"fake", "model.onnx", "v1.0-ov")
+    assert result.runtime == "openvino"
+    assert result.model_version == "v1.0-ov"
