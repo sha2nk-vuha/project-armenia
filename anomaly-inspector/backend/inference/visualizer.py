@@ -35,7 +35,8 @@ def generate_segmentation(
     """
     anomaly_map: float32 [1,1,H,W] or [H,W]
     original_rgb: uint8 [H,W,3]
-    threshold: float in [0,1]; anomaly_map is normalised to [0,1] before comparison.
+    threshold: float — accepted for API compatibility; the segmentation mask
+        is always thresholded at 0.5 on the per-image normalised anomaly map.
     Returns JPEG bytes of original with red contour + semi-transparent defect overlay.
     """
     amap = anomaly_map.squeeze().astype(np.float32)
