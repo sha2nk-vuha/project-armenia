@@ -1,4 +1,3 @@
-import io
 import numpy as np
 import pytest
 import cv2
@@ -83,6 +82,15 @@ def test_load_model_success(client, loaded_model):
     assert resp.json()["runtime"] == "cpu"
 
 
+def test_load_model_bad_extension_returns_422(client):
+    resp = client.post(
+        "/api/load-model",
+        data={"model_version": "v1.0-test"},
+        files={"model_file": ("model.pt", b"fake", "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+
+
 def test_infer_without_model_returns_400(client):
     resp = client.post(
         "/api/infer",
@@ -140,3 +148,4 @@ def test_report_returns_pdf(client, loaded_model):
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/pdf"
     assert resp.content[:4] == b"%PDF"
+    assert resp.headers["content-disposition"].startswith("attachment; filename=")

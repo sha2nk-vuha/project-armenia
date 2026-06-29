@@ -51,7 +51,10 @@ async def load_model(
     model_version: str = Form(...),
 ):
     model_bytes = await model_file.read()
-    sess = engine.load_model(model_bytes, model_file.filename or "model.onnx", model_version)
+    try:
+        sess = engine.load_model(model_bytes, model_file.filename or "model.onnx", model_version)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     return {
         "status": "loaded",
         "runtime": sess.runtime,
