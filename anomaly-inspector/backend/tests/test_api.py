@@ -41,8 +41,11 @@ def client():
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as c:
-        yield c
+    # Suppress startup auto-load of the bundled default model so each test
+    # controls model state explicitly (via the loaded_model fixture or not).
+    with patch("main._load_default_model"):
+        with TestClient(app) as c:
+            yield c
     app.dependency_overrides.clear()
     # Reset model session after each test
     _engine._current_session = None

@@ -1,13 +1,14 @@
 import base64
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
-from config import APP_VERSION
+from config import APP_VERSION, DATA_ROOT, DEFAULT_MODEL_PATH, DEFAULT_MODEL_VERSION
 from database import crud
 from database.db import get_db, init_db
 from inference import engine
@@ -30,6 +31,79 @@ app.add_middleware(
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    _load_default_model()
+
+
+def _load_default_model() -> None:
+    """Auto-load the bundled model so the app is usable without a manual upload."""
+    if engine.get_session() is not None:
+        return
+    if not DEFAULT_MODEL_PATH.exists():
+        logging.warning(
+            "Default model not found at %s; load one via /api/load-model.", DEFAULT_MODEL_PATH
+        )
+        return
+    try:
+        sess = engine.load_model_from_path(str(DEFAULT_MODEL_PATH), DEFAULT_MODEL_VERSION)
+        logging.info(
+            "Default model loaded: version=%s runtime=%s input_shape=%s",
+            sess.model_version,
+            sess.runtime,
+            sess.input_shape,
+        )
+    except Exception as e:
+        logging.error("Failed to load default model from %s: %s", DEFAULT_MODEL_PATH, e)
+
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+
+
+def _resolve_data_path(rel_path: str) -> Path:
+    """Resolve a dataset-relative path, rejecting anything outside DATA_ROOT."""
+    root = DATA_ROOT.resolve()
+    target = (root / rel_path).resolve()
+    if root != target and root not in target.parents:
+        raise HTTPException(status_code=400, detail="Path is outside the dataset root.")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return target
+
+
+@app.get("/api/skus")
+def list_skus():
+    """SKUs are dataset subdirectories that contain a `test/` folder."""
+    if not DATA_ROOT.exists():
+        return {"skus": []}
+    skus = sorted(
+        p.name for p in DATA_ROOT.iterdir() if p.is_dir() and (p / "test").is_dir()
+    )
+    return {"skus": skus}
+
+
+@app.get("/api/skus/{sku}/images")
+def list_sku_images(sku: str):
+    """List the test images for a SKU, grouped implicitly by defect category."""
+    test_dir = (DATA_ROOT / sku / "test").resolve()
+    root = DATA_ROOT.resolve()
+    if root not in test_dir.parents or not test_dir.is_dir():
+        raise HTTPException(status_code=404, detail="SKU not found.")
+    images = []
+    for f in sorted(test_dir.rglob("*")):
+        if f.is_file() and f.suffix.lower() in _IMAGE_EXTS:
+            images.append(
+                {
+                    "path": str(f.relative_to(root)),
+                    "category": f.parent.name,
+                    "name": f.name,
+                }
+            )
+    return {"sku": sku, "images": images}
+
+
+@app.get("/api/images")
+def get_image(path: str):
+    """Serve a dataset image by its DATA_ROOT-relative path (for thumbnails)."""
+    return FileResponse(_resolve_data_path(path))
 
 
 @app.get("/api/status")
@@ -65,16 +139,23 @@ async def load_model(
 
 @app.post("/api/infer")
 async def infer(
-    image: UploadFile = File(...),
     sku_name: str = Form(...),
     threshold: float = Form(...),
+    image: UploadFile | None = File(None),
+    image_path: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     sess = engine.get_session()
     if sess is None:
         raise HTTPException(status_code=400, detail="No model loaded. Load a model first.")
 
-    image_bytes = await image.read()
+    # Image source: an uploaded file, or a path into the on-disk dataset.
+    if image is not None:
+        image_bytes = await image.read()
+    elif image_path:
+        image_bytes = _resolve_data_path(image_path).read_bytes()
+    else:
+        raise HTTPException(status_code=400, detail="Provide an image file or image_path.")
     try:
         tensor, original_rgb = preprocess(image_bytes, sess.input_shape)
     except Exception:

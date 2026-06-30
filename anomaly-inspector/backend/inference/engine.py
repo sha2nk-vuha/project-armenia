@@ -29,6 +29,13 @@ def get_session() -> ModelSession | None:
     return _current_session
 
 
+def load_model_from_path(path: str, model_version: str) -> ModelSession:
+    """Load an .onnx model from a filesystem path (e.g. the bundled default)."""
+    with open(path, "rb") as f:
+        model_bytes = f.read()
+    return load_model(model_bytes, str(path), model_version)
+
+
 def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
     global _current_session
 
@@ -115,8 +122,13 @@ def _load_openvino(model_bytes: bytes) -> object:
     return compiled
 
 
-def _parse_spatial_dim(d, fallback: int = 256) -> int:
-    """Return a concrete spatial dimension; use fallback for symbolic/dynamic dims."""
+def _parse_spatial_dim(d, fallback: int = 392) -> int:
+    """Return a concrete spatial dimension; use fallback for symbolic/dynamic dims.
+
+    The default 392 (= 28 × 14) matches the DINOv2-backbone (patch size 14)
+    Dinomaly export, whose anomaly map is emitted at 392×392. Feeding the model
+    its native resolution keeps inference closest to training.
+    """
     try:
         v = int(d)
         return v if v > 0 else fallback

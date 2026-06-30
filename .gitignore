@@ -1,0 +1,10 @@
+# Large assets — kept out of version control
+/data/
+/model/
+*.onnx
+
+# SDD scratch workspace
+/.superpowers/
+
+# OS
+.DS_Store

@@ -26,6 +26,12 @@ export interface StatusResponse {
   input_shape?: number[];
 }
 
+export interface DatasetImage {
+  path: string;
+  category: string;
+  name: string;
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
@@ -50,6 +56,31 @@ export const api = {
     form.append("threshold", String(threshold));
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
+  },
+
+  async inferByPath(imagePath: string, skuName: string, threshold: number): Promise<InferResponse> {
+    const form = new FormData();
+    form.append("image_path", imagePath);
+    form.append("sku_name", skuName);
+    form.append("threshold", String(threshold));
+    const res = await fetch("/api/infer", { method: "POST", body: form });
+    return handleResponse<InferResponse>(res);
+  },
+
+  async getSkus(): Promise<string[]> {
+    const res = await fetch("/api/skus");
+    const data = await handleResponse<{ skus: string[] }>(res);
+    return data.skus;
+  },
+
+  async getSkuImages(sku: string): Promise<DatasetImage[]> {
+    const res = await fetch(`/api/skus/${encodeURIComponent(sku)}/images`);
+    const data = await handleResponse<{ images: DatasetImage[] }>(res);
+    return data.images;
+  },
+
+  imageUrl(path: string): string {
+    return `/api/images?path=${encodeURIComponent(path)}`;
   },
 
   async getStats(): Promise<StatsResponse> {
