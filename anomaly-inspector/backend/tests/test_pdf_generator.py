@@ -1,5 +1,6 @@
 import io
 from datetime import datetime, timezone
+
 from pypdf import PdfReader
 from reports.pdf_generator import generate_report
 
@@ -17,7 +18,26 @@ def _make_report(**overrides):
         ok_count=90,
         not_ok_count=10,
         pass_rate=90.0,
-        sku_names=["WIDGET-A", "WIDGET-B"],
+        sku_stats=[
+            {
+                "sku_name": "WIDGET-A",
+                "total": 60,
+                "ok": 55,
+                "not_ok": 5,
+                "pass_rate": 91.7,
+                "threshold_min": 0.5,
+                "threshold_max": 0.5,
+            },
+            {
+                "sku_name": "WIDGET-B",
+                "total": 40,
+                "ok": 35,
+                "not_ok": 5,
+                "pass_rate": 87.5,
+                "threshold_min": 0.5,
+                "threshold_max": 0.5,
+            },
+        ],
         threshold_min=0.5,
         threshold_max=0.5,
         model_version="v1.0-patchcore",
@@ -49,8 +69,33 @@ def test_varied_threshold_range():
 
 
 def test_empty_sku_list():
-    result = _make_report(sku_names=[])
+    result = _make_report(sku_stats=[])
     assert result[:4] == b"%PDF"
+
+
+def test_single_sku_omits_aggregate_table():
+    result = _make_report(
+        sku_stats=[
+            {
+                "sku_name": "WIDGET-A",
+                "total": 100,
+                "ok": 90,
+                "not_ok": 10,
+                "pass_rate": 90.0,
+                "threshold_min": 0.5,
+                "threshold_max": 0.5,
+            }
+        ]
+    )
+    text = _pdf_text(result)
+    assert "Per-SKU Statistics" in text
+    assert "Aggregate Statistics" not in text
+
+
+def test_multiple_skus_includes_aggregate_table():
+    text = _pdf_text(_make_report())
+    assert "Per-SKU Statistics" in text
+    assert "Aggregate Statistics" in text
 
 
 def test_customer_name_appears_in_pdf():

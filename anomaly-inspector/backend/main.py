@@ -1,20 +1,25 @@
 import base64
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from config import (
+    APP_VERSION,
+    DATA_ROOT,
+    DEFAULT_MODEL_PATH,
+    DEFAULT_MODEL_VERSION,
+)
+from database import crud
+from database.db import get_db, init_db
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from sqlalchemy.orm import Session
-
-from config import APP_VERSION, DATA_ROOT, DEFAULT_MODEL_PATH, DEFAULT_MODEL_VERSION
-from database import crud
-from database.db import get_db, init_db
 from inference import engine
 from inference.preprocessor import preprocess
 from inference.visualizer import generate_heatmap, generate_segmentation
 from reports.pdf_generator import generate_report
+from sqlalchemy.orm import Session
 
 logging.basicConfig(level=logging.INFO)
 
@@ -196,8 +201,15 @@ async def infer(
 
 
 @app.get("/api/stats")
-def get_stats(db: Session = Depends(get_db)):
-    return crud.get_stats(db)
+def get_stats(sku_name: str | None = None, db: Session = Depends(get_db)):
+    return crud.get_stats(db, sku_name=sku_name or None)
+
+
+@app.post("/api/reset")
+def reset_database(db: Session = Depends(get_db)):
+    """Erase all recorded inspections so a fresh demo can start from a clean slate."""
+    deleted = crud.delete_all_inspections(db)
+    return {"status": "reset", "deleted": deleted}
 
 
 @app.post("/api/report")
@@ -226,8 +238,31 @@ def get_report(
     ok_count = sum(1 for i in inspections if i.verdict == "ok")
     not_ok_count = total - ok_count
     pass_rate = round(ok_count / total * 100, 1)
-    sku_names = [i.sku_name for i in inspections]
     threshold_values = [i.threshold for i in inspections]
+
+    # Per-SKU breakdown: each SKU is reported independently, then aggregated.
+    sku_groups: dict[str, list] = defaultdict(list)
+    for i in inspections:
+        sku_groups[i.sku_name].append(i)
+
+    sku_stats = []
+    for sku in sorted(sku_groups):
+        items = sku_groups[sku]
+        s_total = len(items)
+        s_ok = sum(1 for x in items if x.verdict == "ok")
+        s_not_ok = s_total - s_ok
+        s_thresholds = [x.threshold for x in items]
+        sku_stats.append(
+            {
+                "sku_name": sku,
+                "total": s_total,
+                "ok": s_ok,
+                "not_ok": s_not_ok,
+                "pass_rate": round(s_ok / s_total * 100, 1) if s_total else 0.0,
+                "threshold_min": min(s_thresholds),
+                "threshold_max": max(s_thresholds),
+            }
+        )
 
     current_sess = engine.get_session()
     model_version = current_sess.model_version if current_sess else "unknown"
@@ -239,7 +274,7 @@ def get_report(
         ok_count=ok_count,
         not_ok_count=not_ok_count,
         pass_rate=pass_rate,
-        sku_names=sku_names,
+        sku_stats=sku_stats,
         threshold_min=min(threshold_values),
         threshold_max=max(threshold_values),
         customer_name=customer_name,

@@ -41,6 +41,7 @@ export default function App() {
   const [verdicts, setVerdicts] = useState<Record<string, "ok" | "not_ok">>({});
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [inferError, setInferError] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   // Resizable layout: Setup and Results have explicit widths; Gallery flexes.
   const [setupWidth, setSetupWidth] = useState(DEFAULT_SETUP_WIDTH);
@@ -96,6 +97,7 @@ export default function App() {
     setInferResult(null);
     setInferError(null);
     setVerdicts({});
+    api.getStats(selectedSku).then(setStats).catch(() => {});
     api
       .getSkuImages(selectedSku)
       .then(setImages)
@@ -107,6 +109,27 @@ export default function App() {
     setModelStatus(result);
   }, []);
 
+  const handleResetDatabase = useCallback(async () => {
+    const confirmed = window.confirm(
+      "Erase all recorded inspections? This clears the data used for reports and cannot be undone."
+    );
+    if (!confirmed) return;
+    setResetting(true);
+    try {
+      await api.resetDatabase();
+      setStats(await api.getStats(selectedSku));
+      setInferResult(null);
+      setSelectedPath(null);
+      setOriginalSrc(null);
+      setVerdicts({});
+      setInferError(null);
+    } catch (e) {
+      setInferError(e instanceof Error ? e.message : "Failed to reset database.");
+    } finally {
+      setResetting(false);
+    }
+  }, [selectedSku]);
+
   async function runInferByPath(path: string) {
     if (!modelLoaded || !selectedSku || inferringKey) return;
     setSelectedPath(path);
@@ -117,7 +140,7 @@ export default function App() {
       const result = await api.inferByPath(path, selectedSku, threshold, customerName);
       setInferResult(result);
       setVerdicts((v) => ({ ...v, [path]: result.verdict }));
-      setStats(await api.getStats());
+      setStats(await api.getStats(selectedSku));
     } catch (e) {
       setInferError(e instanceof Error ? e.message : "Inference failed.");
     } finally {
@@ -134,7 +157,7 @@ export default function App() {
     try {
       const result = await api.infer(file, selectedSku, threshold, customerName);
       setInferResult(result);
-      setStats(await api.getStats());
+      setStats(await api.getStats(selectedSku));
     } catch (e) {
       setInferError(e instanceof Error ? e.message : "Inference failed.");
     } finally {
@@ -205,7 +228,7 @@ export default function App() {
             onUpload={runInferUpload}
           />
           <div className="mt-auto border-t border-gray-200 p-4">
-            <StatsPanel stats={stats} />
+            <StatsPanel stats={stats} skuName={selectedSku} onReset={handleResetDatabase} resetting={resetting} />
           </div>
         </aside>
 

@@ -85,9 +85,17 @@ export const api = {
     return `/api/images?path=${encodeURIComponent(path)}`;
   },
 
-  async getStats(): Promise<StatsResponse> {
-    const res = await fetch("/api/stats");
+  async getStats(skuName?: string | null): Promise<StatsResponse> {
+    const url = skuName
+      ? `/api/stats?sku_name=${encodeURIComponent(skuName)}`
+      : "/api/stats";
+    const res = await fetch(url);
     return handleResponse<StatsResponse>(res);
+  },
+
+  async resetDatabase(): Promise<{ status: string; deleted: number }> {
+    const res = await fetch("/api/reset", { method: "POST" });
+    return handleResponse<{ status: string; deleted: number }>(res);
   },
 
   async getStatus(): Promise<StatusResponse> {

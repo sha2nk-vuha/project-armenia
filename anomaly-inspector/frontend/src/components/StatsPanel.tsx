@@ -17,9 +17,12 @@ function StatCard({ label, value, accent = "text-gray-800" }: StatCardProps) {
 
 interface Props {
   stats: StatsResponse | null;
+  skuName?: string | null;
+  onReset?: () => void;
+  resetting?: boolean;
 }
 
-export function StatsPanel({ stats }: Props) {
+export function StatsPanel({ stats, skuName, onReset, resetting = false }: Props) {
   const total = stats?.total ?? 0;
   const ok = stats?.ok ?? 0;
   const notOk = stats?.not_ok ?? 0;
@@ -29,6 +32,11 @@ export function StatsPanel({ stats }: Props) {
     <div className="space-y-3">
       <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
         Statistics
+        {skuName && (
+          <span className="ml-1.5 normal-case font-medium text-gray-400">
+            — {skuName}
+          </span>
+        )}
       </h3>
       <div className="flex gap-2">
         <StatCard label="Total" value={total} />
@@ -46,6 +54,16 @@ export function StatsPanel({ stats }: Props) {
           {passRate.toFixed(1)}% pass
         </span>
       </div>
+      {onReset && (
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={resetting || total === 0}
+          className="w-full rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {resetting ? "Resetting…" : "Reset database"}
+        </button>
+      )}
     </div>
   );
 }
