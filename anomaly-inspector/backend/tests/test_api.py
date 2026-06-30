@@ -152,3 +152,48 @@ def test_report_returns_pdf(client, loaded_model):
     assert resp.headers["content-type"] == "application/pdf"
     assert resp.content[:4] == b"%PDF"
     assert resp.headers["content-disposition"].startswith("attachment; filename=")
+
+
+def test_infer_with_customer_name_returns_200(client, loaded_model):
+    resp = client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-X", "threshold": "0.5", "customer_name": "Acme Corp"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 200
+
+
+def test_report_scoped_to_customer(client, loaded_model):
+    # Two infers: one for Acme, one for Beta
+    client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-A", "threshold": "0.5", "customer_name": "Acme Corp"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-A", "threshold": "0.5", "customer_name": "Beta Inc"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    # Report scoped to Acme should succeed (has records)
+    resp = client.post(
+        "/api/report",
+        data={
+            "start_date": "2020-01-01T00:00:00",
+            "end_date": "2099-12-31T00:00:00",
+            "customer_name": "Acme Corp",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.content[:4] == b"%PDF"
+
+    # Report scoped to an unknown customer should return 404
+    resp = client.post(
+        "/api/report",
+        data={
+            "start_date": "2020-01-01T00:00:00",
+            "end_date": "2099-12-31T00:00:00",
+            "customer_name": "Unknown Corp",
+        },
+    )
+    assert resp.status_code == 404

@@ -17,5 +17,6 @@ class Inspection(Base):
     threshold = Column(Float, nullable=False)
     verdict = Column(String, nullable=False)
     model_version = Column(String, nullable=False)
+    customer_name = Column(String, nullable=False, server_default="", default="")
     heatmap_image = Column(LargeBinary, nullable=False)
     segmentation_image = Column(LargeBinary, nullable=False)

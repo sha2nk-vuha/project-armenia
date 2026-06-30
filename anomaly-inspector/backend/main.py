@@ -141,6 +141,7 @@ async def load_model(
 async def infer(
     sku_name: str = Form(...),
     threshold: float = Form(...),
+    customer_name: str = Form(""),
     image: UploadFile | None = File(None),
     image_path: str | None = Form(None),
     db: Session = Depends(get_db),
@@ -181,6 +182,7 @@ async def infer(
         threshold=threshold,
         verdict=verdict,
         model_version=sess.model_version,
+        customer_name=customer_name,
         heatmap_image=heatmap_bytes,
         segmentation_image=segmentation_bytes,
     )
@@ -202,6 +204,7 @@ def get_stats(db: Session = Depends(get_db)):
 def get_report(
     start_date: str = Form(...),
     end_date: str = Form(...),
+    customer_name: str = Form(""),
     db: Session = Depends(get_db),
 ):
     try:
@@ -210,7 +213,7 @@ def get_report(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601.")
 
-    inspections = crud.get_inspections_in_range(db, start, end)
+    inspections = crud.get_inspections_in_range(db, start, end, customer_name=customer_name or None)
     if not inspections:
         raise HTTPException(status_code=404, detail="No inspections found in the selected date range.")
 
@@ -234,6 +237,7 @@ def get_report(
         sku_names=sku_names,
         threshold_min=min(threshold_values),
         threshold_max=max(threshold_values),
+        customer_name=customer_name,
         model_version=model_version,
         app_version=APP_VERSION,
     )

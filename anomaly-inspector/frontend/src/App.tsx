@@ -33,6 +33,7 @@ export default function App() {
   const [images, setImages] = useState<DatasetImage[]>([]);
   const [imagesLoading, setImagesLoading] = useState(false);
 
+  const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [originalSrc, setOriginalSrc] = useState<string | null>(null);
@@ -114,7 +115,7 @@ export default function App() {
     setInferError(null);
     setInferringKey(path);
     try {
-      const result = await api.inferByPath(path, selectedSku, threshold);
+      const result = await api.inferByPath(path, selectedSku, threshold, customerName);
       setInferResult(result);
       setVerdicts((v) => ({ ...v, [path]: result.verdict }));
       setStats(await api.getStats());
@@ -132,7 +133,7 @@ export default function App() {
     setInferError(null);
     setInferringKey(UPLOAD_KEY);
     try {
-      const result = await api.infer(file, selectedSku, threshold);
+      const result = await api.infer(file, selectedSku, threshold, customerName);
       setInferResult(result);
       setStats(await api.getStats());
     } catch (e) {
@@ -151,9 +152,12 @@ export default function App() {
           <h1 className="text-base font-bold text-gray-900 tracking-tight uppercase">
             Anomaly Detection Inspector
           </h1>
+          {customerName && (
+            <span className="text-sm text-gray-500">Customer: {customerName}</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <ReportModal />
+          <ReportModal customerName={customerName} />
           <SettingsModal
             onModelLoaded={handleModelLoaded}
             isLoaded={modelLoaded}
@@ -179,9 +183,11 @@ export default function App() {
             skus={skus}
             selectedSku={selectedSku}
             threshold={threshold}
+            customerName={customerName}
             modelLoaded={modelLoaded}
             onSkuChange={setSelectedSku}
             onThresholdChange={setThreshold}
+            onCustomerChange={setCustomerName}
             onUpload={runInferUpload}
           />
           <div className="mt-auto border-t border-gray-200 p-4">

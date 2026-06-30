@@ -1,5 +1,12 @@
+import io
 from datetime import datetime, timezone
+from pypdf import PdfReader
 from reports.pdf_generator import generate_report
+
+
+def _pdf_text(pdf_bytes: bytes) -> str:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    return "".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _make_report(**overrides):
@@ -15,6 +22,7 @@ def _make_report(**overrides):
         threshold_max=0.5,
         model_version="v1.0-patchcore",
         app_version="1.0.0",
+        customer_name="Acme Corp",
     )
     defaults.update(overrides)
     return generate_report(**defaults)
@@ -43,3 +51,15 @@ def test_varied_threshold_range():
 def test_empty_sku_list():
     result = _make_report(sku_names=[])
     assert result[:4] == b"%PDF"
+
+
+def test_customer_name_appears_in_pdf():
+    result = _make_report(customer_name="Acme Corp")
+    text = _pdf_text(result)
+    assert "Acme Corp" in text
+
+
+def test_customer_name_na_when_empty():
+    result = _make_report(customer_name="")
+    text = _pdf_text(result)
+    assert "N/A" in text

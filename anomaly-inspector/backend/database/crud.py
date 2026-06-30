@@ -13,6 +13,7 @@ def create_inspection(
     model_version: str,
     heatmap_image: bytes,
     segmentation_image: bytes,
+    customer_name: str = "",
 ) -> Inspection:
     record = Inspection(
         sku_name=sku_name,
@@ -20,6 +21,7 @@ def create_inspection(
         threshold=threshold,
         verdict=verdict,
         model_version=model_version,
+        customer_name=customer_name,
         heatmap_image=heatmap_image,
         segmentation_image=segmentation_image,
     )
@@ -46,11 +48,14 @@ def get_stats(db: Session) -> dict:
 
 
 def get_inspections_in_range(
-    db: Session, start: datetime, end: datetime
+    db: Session,
+    start: datetime,
+    end: datetime,
+    customer_name: str | None = None,
 ) -> list[Inspection]:
-    return (
-        db.query(Inspection)
-        .filter(Inspection.timestamp >= start, Inspection.timestamp <= end)
-        .order_by(Inspection.timestamp)
-        .all()
+    q = db.query(Inspection).filter(
+        Inspection.timestamp >= start, Inspection.timestamp <= end
     )
+    if customer_name:
+        q = q.filter(Inspection.customer_name == customer_name)
+    return q.order_by(Inspection.timestamp).all()

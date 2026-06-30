@@ -19,6 +19,7 @@ def generate_report(
     threshold_max: float,
     model_version: str,
     app_version: str,
+    customer_name: str = "",
 ) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -48,6 +49,12 @@ def generate_report(
     story.append(Paragraph(f"Model Version: {model_version}", normal))
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     story.append(Paragraph(f"Generated: {generated}", normal))
+    story.append(Spacer(1, 6 * mm))
+
+    # ── Customer ────────────────────────────────────────────────────────────
+    story.append(Paragraph("Customer", heading_style))
+    customer_text = customer_name if customer_name else "N/A"
+    story.append(Paragraph(customer_text, normal))
     story.append(Spacer(1, 6 * mm))
 
     # ── Date Range ──────────────────────────────────────────────────────────

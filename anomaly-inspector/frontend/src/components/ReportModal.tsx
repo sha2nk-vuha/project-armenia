@@ -13,7 +13,11 @@ import {
   DialogTrigger,
 } from "./ui/dialog";
 
-export function ReportModal() {
+interface Props {
+  customerName: string;
+}
+
+export function ReportModal({ customerName }: Props) {
   const [open, setOpen] = useState(false);
   const [startDate, setStartDate] = useState<Date | null>(null);
   const [endDate, setEndDate] = useState<Date | null>(null);
@@ -36,7 +40,7 @@ export function ReportModal() {
     setLoading(true);
     setError(null);
     try {
-      const blob = await api.generateReport(toIso(startDate), toIso(endDate));
+      const blob = await api.generateReport(toIso(startDate), toIso(endDate), customerName);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -67,6 +71,10 @@ export function ReportModal() {
         </DialogHeader>
 
         <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            {customerName ? `Report for: ${customerName}` : "Report for: All customers"}
+          </p>
+
           <div className="space-y-1.5">
             <Label>Start Date</Label>
             <DatePicker

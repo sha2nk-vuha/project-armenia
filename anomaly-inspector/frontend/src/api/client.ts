@@ -49,20 +49,22 @@ export const api = {
     return handleResponse<LoadModelResponse>(res);
   },
 
-  async infer(image: File, skuName: string, threshold: number): Promise<InferResponse> {
+  async infer(image: File, skuName: string, threshold: number, customerName: string): Promise<InferResponse> {
     const form = new FormData();
     form.append("image", image);
     form.append("sku_name", skuName);
     form.append("threshold", String(threshold));
+    form.append("customer_name", customerName);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
   },
 
-  async inferByPath(imagePath: string, skuName: string, threshold: number): Promise<InferResponse> {
+  async inferByPath(imagePath: string, skuName: string, threshold: number, customerName: string): Promise<InferResponse> {
     const form = new FormData();
     form.append("image_path", imagePath);
     form.append("sku_name", skuName);
     form.append("threshold", String(threshold));
+    form.append("customer_name", customerName);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
   },
@@ -93,10 +95,11 @@ export const api = {
     return handleResponse<StatusResponse>(res);
   },
 
-  async generateReport(startDate: string, endDate: string): Promise<Blob> {
+  async generateReport(startDate: string, endDate: string, customerName: string): Promise<Blob> {
     const form = new FormData();
     form.append("start_date", startDate);
     form.append("end_date", endDate);
+    form.append("customer_name", customerName);
     const res = await fetch("/api/report", { method: "POST", body: form });
     if (!res.ok) {
       const text = await res.text();
