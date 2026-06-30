@@ -5,6 +5,9 @@
 
 # SDD scratch workspace
 /.superpowers/
+.agents
+.claude
+agent
 
 # OS
 .DS_Store
