@@ -1,7 +1,7 @@
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -15,6 +15,11 @@ class ModelSession:
     input_name: str
     input_shape: tuple[int, int]
     model_version: str
+    output_names: list[str] = field(default_factory=list)
+    map_idx: int = 0
+    # Index of the scalar image-score output. None → derive score from the
+    # anomaly map's maximum (Anomalib's image score == max pixel score).
+    score_idx: int | None = 1
 
 
 _current_session: ModelSession | None = None
@@ -32,6 +37,7 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
 
     session, runtime = _select_runtime(model_bytes)
     input_name, input_shape = _get_onnx_meta(session) if runtime != "openvino" else _get_openvino_meta(session)
+    output_names, map_idx, score_idx = _get_output_plan(session, runtime)
 
     _current_session = ModelSession(
         session=session,
@@ -39,6 +45,9 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
         input_name=input_name,
         input_shape=input_shape,
         model_version=model_version,
+        output_names=output_names,
+        map_idx=map_idx,
+        score_idx=score_idx,
     )
     logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
     return _current_session
@@ -70,8 +79,10 @@ def run_inference(tensor: np.ndarray) -> tuple[np.ndarray, float]:
         raise RuntimeError("No model loaded. Call load_model() first.")
 
     if sess.runtime == "openvino":
-        return _run_openvino(sess.session, tensor)
-    return _run_onnx(sess.session, sess.input_name, tensor)
+        outputs = _run_openvino_raw(sess.session, tensor)
+    else:
+        outputs = sess.session.run(None, {sess.input_name: tensor})
+    return _extract_outputs(outputs, sess.map_idx, sess.score_idx)
 
 
 # ── Private helpers ──────────────────────────────────────────────────────────
@@ -129,15 +140,88 @@ def _get_openvino_meta(compiled_model) -> tuple[str, tuple[int, int]]:
     return inp.any_name, (h, w)
 
 
-def _run_onnx(session, input_name: str, tensor: np.ndarray) -> tuple[np.ndarray, float]:
-    outputs = session.run(None, {input_name: tensor})
-    anomaly_map: np.ndarray = outputs[0]
-    pred_score = float(outputs[1].squeeze())
-    return anomaly_map, pred_score
-
-
-def _run_openvino(compiled_model, tensor: np.ndarray) -> tuple[np.ndarray, float]:
+def _run_openvino_raw(compiled_model, tensor: np.ndarray) -> list:
+    """Run the OpenVINO model and return outputs as a list in port order."""
     results = compiled_model([tensor])
-    out0 = results[compiled_model.output(0)]
-    out1 = results[compiled_model.output(1)]
-    return out0, float(out1.squeeze())
+    return [results[compiled_model.output(i)] for i in range(len(compiled_model.outputs))]
+
+
+def _classify_outputs(specs: list[tuple[str, tuple]]) -> tuple[int, int | None]:
+    """Identify which output is the anomaly map and which is the image score.
+
+    Anomalib ONNX exports vary by version and may emit anomaly_map, pred_score,
+    pred_label, and pred_mask in any order. Select by name hint, falling back to
+    shape: the anomaly map is the highest-dimensional output; the score is a
+    scalar output that is neither a label nor a mask. Returns (map_idx,
+    score_idx); score_idx is None when no scalar score exists (derive from the
+    map maximum).
+    """
+    # anomaly map — prefer an explicit name, else the most-dimensional output
+    map_idx = next(
+        (i for i, (name, _) in enumerate(specs)
+         if "anomaly" in name.lower() or "map" in name.lower()),
+        None,
+    )
+    if map_idx is None:
+        map_idx = max(range(len(specs)), key=lambda i: len(specs[i][1]))
+
+    # score — prefer a name containing "score"
+    score_idx = next(
+        (i for i, (name, _) in enumerate(specs)
+         if i != map_idx and "score" in name.lower()),
+        None,
+    )
+    # else the first scalar-ish output that is not a label or mask
+    if score_idx is None:
+        score_idx = next(
+            (i for i, (name, shape) in enumerate(specs)
+             if i != map_idx
+             and "label" not in name.lower()
+             and "mask" not in name.lower()
+             and len(shape) <= 1),
+            None,
+        )
+    return map_idx, score_idx
+
+
+def _get_output_plan(session, runtime: str) -> tuple[list[str], int, int | None]:
+    """Inspect model outputs and decide which are the anomaly map and score.
+
+    Defensive: if the outputs cannot be inspected (e.g. a mocked session in
+    tests), fall back to the conventional map=#0, score=#1 layout.
+    """
+    try:
+        if runtime == "openvino":
+            specs = [(o.any_name, tuple(o.shape)) for o in session.outputs]
+        else:
+            specs = [(o.name, tuple(o.shape)) for o in session.get_outputs()]
+        if not specs:
+            raise ValueError("model exposes no outputs")
+
+        names = [s[0] for s in specs]
+        map_idx, score_idx = _classify_outputs(specs)
+        logger.info("Model outputs: %s", specs)
+        logger.info(
+            "Output plan: anomaly_map=#%d (%s), pred_score=%s",
+            map_idx,
+            names[map_idx],
+            "max(anomaly_map)" if score_idx is None else f"#{score_idx} ({names[score_idx]})",
+        )
+        return names, map_idx, score_idx
+    except Exception as e:
+        logger.warning(
+            "Could not classify model outputs (%s); defaulting to map=#0, score=#1", e
+        )
+        return [], 0, 1
+
+
+def _extract_outputs(outputs: list, map_idx: int, score_idx: int | None) -> tuple[np.ndarray, float]:
+    """Pull the anomaly map and a scalar image score from the raw model outputs."""
+    anomaly_map = np.asarray(outputs[map_idx], dtype=np.float32)
+    if score_idx is not None and score_idx < len(outputs):
+        raw = np.asarray(outputs[score_idx]).squeeze()
+        try:
+            return anomaly_map, float(raw)
+        except (TypeError, ValueError):
+            pass  # not a scalar — fall through to map maximum
+    return anomaly_map, float(anomaly_map.max())

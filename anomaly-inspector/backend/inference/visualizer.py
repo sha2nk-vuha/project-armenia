@@ -6,17 +6,18 @@ def generate_heatmap(
     anomaly_map: np.ndarray, original_rgb: np.ndarray, alpha: float = 0.5
 ) -> bytes:
     """
-    anomaly_map: float32 [1,1,H,W] or [H,W]
+    anomaly_map: float32 [1,1,H,W] or [H,W], already normalised to [0,1]
+        (Anomalib bakes min-max + threshold normalisation into the exported
+        graph, with 0.5 == the calibrated threshold).
     original_rgb: uint8 [H,W,3]
     Returns JPEG bytes of jet-coloured heatmap blended over the original.
+
+    Uses a fixed [0,1]→[0,255] scale, NOT per-image min-max. Per-image
+    normalisation would stretch a clean image's narrow score range across the
+    full colour map and make every pixel look anomalous.
     """
     amap = anomaly_map.squeeze().astype(np.float32)
-
-    amap_min, amap_max = float(amap.min()), float(amap.max())
-    if amap_max > amap_min:
-        amap_norm = ((amap - amap_min) / (amap_max - amap_min) * 255).astype(np.uint8)
-    else:
-        amap_norm = np.zeros_like(amap, dtype=np.uint8)
+    amap_norm = (np.clip(amap, 0.0, 1.0) * 255).astype(np.uint8)
 
     h, w = original_rgb.shape[:2]
     amap_resized = cv2.resize(amap_norm, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -33,24 +34,20 @@ def generate_segmentation(
     anomaly_map: np.ndarray, original_rgb: np.ndarray, threshold: float
 ) -> bytes:
     """
-    anomaly_map: float32 [1,1,H,W] or [H,W]
+    anomaly_map: float32 [1,1,H,W] or [H,W], already normalised to [0,1]
+        (Anomalib bakes normalisation into the exported graph).
     original_rgb: uint8 [H,W,3]
-    threshold: float — accepted for API compatibility; the segmentation mask
-        is always thresholded at 0.5 on the per-image normalised anomaly map.
+    threshold: float in [0,1] — pixels scoring above this are flagged as defects.
+        Operates on the same normalised scale as the image-level pred_score, so
+        the segmentation agrees with the OK/NOT OK verdict.
     Returns JPEG bytes of original with red contour + semi-transparent defect overlay.
     """
-    amap = anomaly_map.squeeze().astype(np.float32)
-
-    amap_min, amap_max = float(amap.min()), float(amap.max())
-    if amap_max > amap_min:
-        amap_norm = (amap - amap_min) / (amap_max - amap_min)
-    else:
-        amap_norm = np.zeros_like(amap)
+    amap = np.clip(anomaly_map.squeeze().astype(np.float32), 0.0, 1.0)
 
     h, w = original_rgb.shape[:2]
-    amap_resized = cv2.resize(amap_norm.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    amap_resized = cv2.resize(amap, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    mask = (amap_resized > 0.5).astype(np.uint8) * 255
+    mask = (amap_resized > threshold).astype(np.uint8) * 255
 
     result_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
     overlay = result_bgr.copy()
