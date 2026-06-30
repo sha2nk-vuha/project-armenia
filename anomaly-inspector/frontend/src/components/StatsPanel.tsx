@@ -9,7 +9,7 @@ interface StatCardProps {
 function StatCard({ label, value, accent = "text-gray-800" }: StatCardProps) {
   return (
     <div className="flex flex-col items-center justify-center rounded-2xl bg-gray-50 border border-gray-200 px-4 py-3 flex-1">
-      <span className={`text-2xl font-bold ${accent}`}>{value}</span>
+      <span className={`text-2xl font-bold font-mono ${accent}`}>{value}</span>
       <span className="text-xs text-gray-500 mt-0.5">{label}</span>
     </div>
   );
