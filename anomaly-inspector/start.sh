@@ -22,7 +22,32 @@ FRONTEND_DIR="$SCRIPT_DIR/frontend"
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# The pinned backend dependencies (onnxruntime==1.18.0, numpy==1.26.4, …) only
+# ship wheels for Python 3.10–3.12. Pick a compatible interpreter automatically
+# unless the caller forces one via PYTHON_BIN. Note that a conda "base" env or a
+# bare `python3` is often 3.13+, which has no matching wheels.
+pick_python() {
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    echo "$PYTHON_BIN"
+    return
+  fi
+  local candidate
+  for candidate in python3.12 python3.11 python3.10 python3; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    local ver
+    ver="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || continue
+    case "$ver" in
+      3.10|3.11|3.12) echo "$candidate"; return ;;
+    esac
+  done
+  return 1
+}
+
+if ! PYTHON_BIN="$(pick_python)"; then
+  echo "ERROR: No compatible Python found (need 3.10, 3.11, or 3.12)." >&2
+  echo "       Install one of those, or set PYTHON_BIN to a compatible interpreter." >&2
+  exit 1
+fi
 
 setup_only=false
 if [[ "${1:-}" == "--setup" ]]; then
@@ -37,11 +62,37 @@ require() {
 }
 
 require "$PYTHON_BIN"
+
+# Vite 8 requires Node >= 20.19. A stale system Node (e.g. /usr/bin/node 12) will
+# fail with "syntax error, unexpected token '.'" on modern JS. If nvm is present,
+# load it and switch to a compatible version automatically.
+NODE_MIN_MAJOR=20
+node_major() { node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
+
+if [[ "$(node_major)" -lt "$NODE_MIN_MAJOR" ]] && [[ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]]; then
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # Relax strict mode: nvm's functions can return non-zero in ways that would
+  # trip `set -e`, and we pass --no-use so sourcing doesn't inherit this
+  # script's positional args (e.g. --setup) into nvm's auto-use parser.
+  set +eu
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh" --no-use
+  nvm use --lts >/dev/null 2>&1 || nvm use default >/dev/null 2>&1 || nvm use node >/dev/null 2>&1
+  set -eu
+fi
+
+require node
 require npm
+
+if [[ "$(node_major)" -lt "$NODE_MIN_MAJOR" ]]; then
+  echo "ERROR: Node $(node --version) is too old; Vite needs Node >= ${NODE_MIN_MAJOR}.19." >&2
+  echo "       Install a newer Node (e.g. 'nvm install --lts') and re-run." >&2
+  exit 1
+fi
 
 # ── Backend setup ─────────────────────────────────────────────────────────
 if [[ ! -d "$BACKEND_DIR/venv" ]]; then
-  echo "==> Creating Python virtualenv (backend/venv)"
+  echo "==> Creating Python virtualenv (backend/venv) using $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
   "$PYTHON_BIN" -m venv "$BACKEND_DIR/venv"
   echo "==> Installing backend dependencies"
   "$BACKEND_DIR/venv/bin/pip" install --upgrade pip >/dev/null

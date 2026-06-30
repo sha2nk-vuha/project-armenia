@@ -145,9 +145,23 @@ def _get_onnx_meta(session) -> tuple[str, tuple[int, int]]:
     return meta.name, (h, w)
 
 
+def _ov_dims(partial_shape) -> tuple:
+    """Convert an OpenVINO PartialShape to a tuple of ints, using -1 for dynamic
+    dimensions. Reading `.shape` directly raises on dynamic-shaped models, so we
+    inspect the partial shape and let callers apply fallbacks for -1.
+    """
+    dims = []
+    for d in partial_shape:
+        try:
+            dims.append(int(d.get_length()) if d.is_static else -1)
+        except Exception:
+            dims.append(-1)
+    return tuple(dims)
+
+
 def _get_openvino_meta(compiled_model) -> tuple[str, tuple[int, int]]:
     inp = compiled_model.input(0)
-    shape = inp.shape
+    shape = _ov_dims(inp.partial_shape())
     h, w = _parse_spatial_dim(shape[2]), _parse_spatial_dim(shape[3])
     return inp.any_name, (h, w)
 
