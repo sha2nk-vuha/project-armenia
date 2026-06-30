@@ -215,7 +215,12 @@ def get_report(
 
     inspections = crud.get_inspections_in_range(db, start, end, customer_name=customer_name or None)
     if not inspections:
-        raise HTTPException(status_code=404, detail="No inspections found in the selected date range.")
+        detail = (
+            f"No inspections found for customer '{customer_name}' in the selected date range."
+            if customer_name
+            else "No inspections found in the selected date range."
+        )
+        raise HTTPException(status_code=404, detail=detail)
 
     total = len(inspections)
     ok_count = sum(1 for i in inspections if i.verdict == "ok")
