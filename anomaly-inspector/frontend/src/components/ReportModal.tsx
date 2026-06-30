@@ -82,7 +82,7 @@ export function ReportModal({ customerName }: Props) {
               onChange={(d: Date | null) => setStartDate(d)}
               dateFormat="yyyy-MM-dd"
               placeholderText="Select start date"
-              className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
             />
           </div>
 
@@ -94,7 +94,7 @@ export function ReportModal({ customerName }: Props) {
               dateFormat="yyyy-MM-dd"
               placeholderText="Select end date"
               minDate={startDate ?? undefined}
-              className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
             />
           </div>
 

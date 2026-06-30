@@ -11,7 +11,7 @@ export function ThresholdControl({ value, onChange }: Props) {
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <Label>Threshold</Label>
-        <span className="text-sm font-mono font-medium text-blue-600">
+        <span className="text-sm font-mono font-medium text-yellow-600">
           {value.toFixed(2)}
         </span>
       </div>
@@ -26,9 +26,9 @@ export function ThresholdControl({ value, onChange }: Props) {
           onValueChange={([v]) => onChange(v)}
         >
           <SliderPrimitive.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-gray-200">
-            <SliderPrimitive.Range className="absolute h-full bg-blue-600" />
+            <SliderPrimitive.Range className="absolute h-full bg-yellow-400" />
           </SliderPrimitive.Track>
-          <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border-2 border-blue-600 bg-white shadow transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" />
+          <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border-2 border-yellow-400 bg-white shadow transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300" />
         </SliderPrimitive.Root>
         <span>1.00</span>
       </div>

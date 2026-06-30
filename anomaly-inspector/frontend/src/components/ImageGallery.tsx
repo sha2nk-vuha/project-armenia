@@ -71,10 +71,10 @@ export function ImageGallery({
                   onClick={() => onSelect(img.path)}
                   title={img.name}
                   className={cn(
-                    "relative aspect-square rounded-md overflow-hidden border bg-white transition-all disabled:cursor-not-allowed disabled:opacity-60",
+                    "relative aspect-square rounded-xl overflow-hidden border bg-white transition-all disabled:cursor-not-allowed disabled:opacity-60",
                     isSelected
-                      ? "border-blue-500 ring-2 ring-blue-400"
-                      : "border-gray-200 hover:border-blue-300"
+                      ? "border-yellow-400 ring-2 ring-yellow-300"
+                      : "border-gray-200 hover:border-yellow-300"
                   )}
                 >
                   <img
@@ -93,7 +93,7 @@ export function ImageGallery({
                   )}
                   {isInferring && (
                     <span className="absolute inset-0 flex items-center justify-center bg-white/60">
-                      <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                      <Loader2 className="h-4 w-4 animate-spin text-yellow-500" />
                     </span>
                   )}
                 </button>

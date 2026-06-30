@@ -9,7 +9,7 @@ function ImagePanel({ src, label }: ImagePanelProps) {
   return (
     <div className="flex flex-col gap-1 flex-1 min-w-0">
       <span className="text-xs font-medium text-gray-500 text-center">{label}</span>
-      <div className="aspect-square w-full rounded-lg bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center">
+      <div className="aspect-square w-full rounded-2xl bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center">
         {src ? (
           <img src={src} alt={label} className="w-full h-full object-contain" />
         ) : (

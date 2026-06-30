@@ -45,7 +45,7 @@ export function ResizeHandle({ onDrag, onReset }: Props) {
         document.body.style.userSelect = "none";
       }}
       onDoubleClick={onReset}
-      className="w-1.5 shrink-0 cursor-col-resize bg-gray-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+      className="w-1.5 shrink-0 cursor-col-resize bg-gray-200 hover:bg-yellow-400 active:bg-yellow-300 transition-colors"
       title="Drag to resize"
     />
   );

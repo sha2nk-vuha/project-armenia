@@ -9,7 +9,7 @@ interface Props {
 export function VerdictBadge({ verdict, anomalyScore }: Props) {
   if (verdict === null) {
     return (
-      <div className="flex items-center justify-center h-20 rounded-lg bg-gray-50 border border-dashed border-gray-200">
+      <div className="flex items-center justify-center h-20 rounded-2xl bg-gray-50 border border-dashed border-gray-200">
         <p className="text-sm text-gray-400">Run inference to see result</p>
       </div>
     );
@@ -19,7 +19,7 @@ export function VerdictBadge({ verdict, anomalyScore }: Props) {
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center gap-2 h-20 rounded-lg border-2",
+        "flex flex-col items-center justify-center gap-2 h-20 rounded-2xl border-2",
         isOk
           ? "bg-green-50 border-green-300 text-green-700"
           : "bg-red-50 border-red-300 text-red-700"

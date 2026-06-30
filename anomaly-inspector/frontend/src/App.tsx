@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from "react";
-import { ScanLine } from "lucide-react";
 import {
   api,
   type InferResponse,
@@ -147,13 +146,28 @@ export default function App() {
     <div className="min-h-screen h-screen bg-gray-50 flex flex-col">
       {/* Navbar */}
       <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shadow-sm shrink-0">
-        <div className="flex items-center gap-2">
-          <ScanLine className="h-6 w-6 text-blue-600" />
-          <h1 className="text-base font-bold text-gray-900 tracking-tight uppercase">
-            Anomaly Detection Inspector
-          </h1>
+        <div className="flex items-center gap-3">
+          <img
+            src="/logo.svg"
+            alt="Vuha"
+            height={28}
+            className="h-7 w-auto"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+          <div className="flex flex-col leading-tight">
+            <span className="text-base font-semibold text-gray-900 tracking-[.3px]">
+              Vuha
+            </span>
+            <span className="text-[11px] text-gray-400 leading-none">
+              Anomaly Inspector
+            </span>
+          </div>
           {customerName && (
-            <span className="text-sm text-gray-500">Customer: {customerName}</span>
+            <span className="text-sm text-gray-500 pl-2 border-l border-gray-200">
+              Customer: {customerName}
+            </span>
           )}
         </div>
         <div className="flex items-center gap-2">

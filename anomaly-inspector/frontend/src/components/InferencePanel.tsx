@@ -37,7 +37,7 @@ export function InferencePanel({
           value={customerName}
           onChange={(e) => onCustomerChange(e.target.value)}
           placeholder="Optional"
-          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
         />
       </div>
 
@@ -48,7 +48,7 @@ export function InferencePanel({
           value={selectedSku ?? ""}
           onChange={(e) => onSkuChange(e.target.value)}
           disabled={skus.length === 0}
-          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-yellow-400 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <option value="" disabled>
             {skus.length ? "Select a SKU…" : "No SKUs found"}
@@ -78,7 +78,7 @@ export function InferencePanel({
           htmlFor="image-upload"
           className={`flex flex-col items-center justify-center w-full h-24 border-2 border-dashed rounded-lg transition-colors text-gray-400 ${
             canUpload
-              ? "border-gray-300 cursor-pointer hover:border-blue-400 hover:bg-blue-50"
+              ? "border-gray-300 cursor-pointer hover:border-yellow-400 hover:bg-yellow-50"
               : "border-gray-200 cursor-not-allowed opacity-60"
           }`}
         >
