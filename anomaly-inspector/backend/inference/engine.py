@@ -84,12 +84,24 @@ def run_inference(tensor: np.ndarray) -> tuple[np.ndarray, float]:
     sess = _current_session
     if sess is None:
         raise RuntimeError("No model loaded. Call load_model() first.")
+    return run_inference_on(sess, tensor)
 
-    if sess.runtime == "openvino":
-        outputs = _run_openvino_raw(sess.session, tensor)
-    else:
-        outputs = sess.session.run(None, {sess.input_name: tensor})
+
+def run_inference_on(sess: "ModelSession", tensor: np.ndarray) -> tuple[np.ndarray, float]:
+    """Run a specific session's model. Returns (anomaly_map [1,1,H,W], pred_score)."""
+    outputs = run_raw(sess, tensor)
     return _extract_outputs(outputs, sess.map_idx, sess.score_idx)
+
+
+def run_raw(sess: "ModelSession", tensor: np.ndarray) -> list:
+    """Run a session's model and return its raw outputs as a list, in port order.
+
+    Feature pipelines that interpret outputs themselves (e.g. detectors) use this
+    instead of run_inference_on, which is specific to the anomaly-map layout.
+    """
+    if sess.runtime == "openvino":
+        return _run_openvino_raw(sess.session, tensor)
+    return sess.session.run(None, {sess.input_name: tensor})
 
 
 # ── Private helpers ──────────────────────────────────────────────────────────
