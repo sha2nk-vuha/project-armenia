@@ -4,23 +4,28 @@ This isolates everything that depends on the exact RF-DETR ONNX export — the
 preprocessing parameters, the raw-output decode, and box drawing — from the
 Feature-agnostic pipeline orchestration in `pipeline.py`.
 
-NOTE: The decode assumes the conventional DETR output layout
-(`pred_logits [1, Q, C]`, `pred_boxes [1, Q, 4]` in normalised cxcywh, class
-probabilities via sigmoid). The exact layout of the real export must be
-confirmed and these defaults corrected before results can be trusted.
+Confirmed against the rfdetr-nano export: input `[1,3,384,384]`, outputs
+`dets [1,300,4]` (normalised cxcywh boxes) and `labels [1,300,C]` (per-class
+logits; probabilities via sigmoid). The decode identifies boxes vs logits by
+shape, so output order does not matter.
 """
 from dataclasses import dataclass, field
 import io
+import json
+import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
 
+logger = logging.getLogger(__name__)
+
 
 # Standard ImageNet normalisation, the RF-DETR default. Overridable via sidecar.
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
-_DEFAULT_INPUT_SIZE = (560, 560)
+_DEFAULT_INPUT_SIZE = (384, 384)
 
 
 @dataclass
@@ -45,6 +50,42 @@ class PresenceConfig:
     mean: tuple[float, float, float] = _IMAGENET_MEAN
     std: tuple[float, float, float] = _IMAGENET_STD
     normalize: bool = True  # False when normalisation is baked into the graph
+
+
+def sidecar_path(model_path: str) -> str:
+    """The sidecar JSON path for a model: same directory and stem, `.json`.
+
+    e.g. `model/rfdetr-nano.onnx` -> `model/rfdetr-nano.json`.
+    """
+    return str(Path(model_path).with_suffix(".json"))
+
+
+def load_config(path: str) -> PresenceConfig:
+    """Load a `PresenceConfig` from a sidecar JSON, defaulting when absent.
+
+    The sidecar carries the Class Catalog (`labels`, index->name) and optional
+    preprocessing overrides. Missing files or fields fall back to RF-DETR
+    defaults so the Feature stays usable (with raw class indices) even without a
+    sidecar. JSON object keys are strings, so `labels` keys are coerced to int.
+    """
+    p = Path(path)
+    if not p.is_file():
+        logger.info("No RF-DETR sidecar at %s; using defaults (raw class indices).", path)
+        return PresenceConfig()
+
+    data = json.loads(p.read_text())
+    defaults = PresenceConfig()
+    labels = {int(k): str(v) for k, v in data.get("labels", {}).items()}
+    input_size = data.get("input_size")
+    mean = data.get("mean")
+    std = data.get("std")
+    return PresenceConfig(
+        labels=labels,
+        input_size=tuple(input_size) if input_size else defaults.input_size,
+        mean=tuple(mean) if mean else defaults.mean,
+        std=tuple(std) if std else defaults.std,
+        normalize=data.get("normalize", defaults.normalize),
+    )
 
 
 def evaluate_presence(

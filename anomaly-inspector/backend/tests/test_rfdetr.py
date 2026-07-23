@@ -115,3 +115,49 @@ def test_draw_detections_returns_decodable_image():
     assert isinstance(out, bytes) and len(out) > 0
     decoded = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
     assert decoded.shape == (50, 50, 3)
+
+
+def test_load_config_parses_sidecar(tmp_path):
+    import json
+    from inference.rfdetr import load_config
+
+    sidecar = tmp_path / "rfdetr-nano.json"
+    sidecar.write_text(json.dumps({
+        "labels": {"0": "gasket", "1": "no-gasket", "2": "background"},
+        "input_size": [384, 384],
+        "mean": [0.485, 0.456, 0.406],
+        "std": [0.229, 0.224, 0.225],
+        "normalize": True,
+    }))
+
+    config = load_config(str(sidecar))
+
+    # JSON object keys are strings; they must be coerced to int class ids.
+    assert config.labels == {0: "gasket", 1: "no-gasket", 2: "background"}
+    assert config.input_size == (384, 384)
+    assert config.normalize is True
+
+
+def test_load_config_falls_back_to_defaults_when_absent(tmp_path):
+    from inference.rfdetr import load_config
+
+    config = load_config(str(tmp_path / "missing.json"))
+
+    # No sidecar -> usable defaults, empty catalog.
+    assert config.labels == {}
+    assert isinstance(config.input_size, tuple)
+
+
+def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
+    import json
+    from inference.rfdetr import load_config, PresenceConfig
+
+    sidecar = tmp_path / "labels-only.json"
+    sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))
+
+    config = load_config(str(sidecar))
+
+    assert config.labels == {0: "gasket"}
+    # Unspecified fields fall back to RF-DETR defaults.
+    assert config.mean == PresenceConfig().mean
+    assert config.normalize == PresenceConfig().normalize
