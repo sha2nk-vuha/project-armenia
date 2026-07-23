@@ -9,16 +9,18 @@ from .models import Inspection
 def create_inspection(
     db: Session,
     sku_name: str,
-    anomaly_score: float,
     threshold: float,
     verdict: str,
     model_version: str,
-    heatmap_image: bytes,
-    segmentation_image: bytes,
+    feature: str = "anomaly_detection",
+    anomaly_score: float | None = None,
+    heatmap_image: bytes | None = None,
+    segmentation_image: bytes | None = None,
     customer_name: str = "",
 ) -> Inspection:
     record = Inspection(
         sku_name=sku_name,
+        feature=feature,
         anomaly_score=anomaly_score,
         threshold=threshold,
         verdict=verdict,
@@ -33,18 +35,21 @@ def create_inspection(
     return record
 
 
-def get_stats(db: Session, sku_name: str | None = None) -> dict:
-    base = db.query(func.count(Inspection.id))
-    if sku_name:
-        base = base.filter(Inspection.sku_name == sku_name)
-    total = base.scalar() or 0
-    ok_q = db.query(func.count(Inspection.id)).filter(Inspection.verdict == "ok")
-    not_ok_q = db.query(func.count(Inspection.id)).filter(Inspection.verdict == "not_ok")
-    if sku_name:
-        ok_q = ok_q.filter(Inspection.sku_name == sku_name)
-        not_ok_q = not_ok_q.filter(Inspection.sku_name == sku_name)
-    ok_count = ok_q.scalar() or 0
-    not_ok_count = not_ok_q.scalar() or 0
+def get_stats(db: Session, sku_name: str | None = None, feature: str | None = None) -> dict:
+    def _scoped(q):
+        if sku_name:
+            q = q.filter(Inspection.sku_name == sku_name)
+        if feature:
+            q = q.filter(Inspection.feature == feature)
+        return q
+
+    total = _scoped(db.query(func.count(Inspection.id))).scalar() or 0
+    ok_count = _scoped(
+        db.query(func.count(Inspection.id)).filter(Inspection.verdict == "ok")
+    ).scalar() or 0
+    not_ok_count = _scoped(
+        db.query(func.count(Inspection.id)).filter(Inspection.verdict == "not_ok")
+    ).scalar() or 0
     pass_rate = round(ok_count / total * 100, 1) if total > 0 else 0.0
     return {"total": total, "ok": ok_count, "not_ok": not_ok_count, "pass_rate": pass_rate}
 

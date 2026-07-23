@@ -5,6 +5,7 @@ import {
   type StatsResponse,
   type LoadModelResponse,
   type DatasetImage,
+  type FeatureInfo,
 } from "./api/client";
 import { SettingsModal } from "./components/SettingsModal";
 import { ReportModal } from "./components/ReportModal";
@@ -15,8 +16,6 @@ import { VerdictBadge } from "./components/VerdictBadge";
 import { StatsPanel } from "./components/StatsPanel";
 import { ResizeHandle } from "./components/ResizeHandle";
 
-const UPLOAD_KEY = "__upload__";
-
 const DEFAULT_SETUP_WIDTH = 288;
 const DEFAULT_RESULTS_WIDTH = 480;
 const MIN_GALLERY_WIDTH = 200;
@@ -26,11 +25,17 @@ const clamp = (v: number, min: number, max: number) =>
 
 export default function App() {
   const [modelStatus, setModelStatus] = useState<LoadModelResponse | null>(null);
+  const [features, setFeatures] = useState<FeatureInfo[]>([]);
+  const [activeFeature, setActiveFeature] = useState<string | null>(null);
+  const [featureSwitching, setFeatureSwitching] = useState(false);
 
   const [skus, setSkus] = useState<string[]>([]);
   const [selectedSku, setSelectedSku] = useState<string | null>(null);
   const [images, setImages] = useState<DatasetImage[]>([]);
   const [imagesLoading, setImagesLoading] = useState(false);
+  // Locally-uploaded images, keyed by their synthetic gallery path. Inferring
+  // one of these uploads the file rather than referencing a dataset path.
+  const [uploadedFiles, setUploadedFiles] = useState<Record<string, File>>({});
 
   const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
@@ -48,6 +53,9 @@ export default function App() {
   const [resultsWidth, setResultsWidth] = useState(DEFAULT_RESULTS_WIDTH);
 
   const modelLoaded = !!modelStatus;
+  const activeFeatureInfo = features.find((f) => f.name === activeFeature) ?? null;
+  const thresholdLabel = activeFeatureInfo?.threshold_label ?? "Threshold";
+  const resultFeature = inferResult?.feature ?? activeFeature ?? "anomaly_detection";
 
   // Setup panel grows from the left edge, so its width == the pointer X.
   const handleSetupDrag = useCallback(
@@ -70,6 +78,8 @@ export default function App() {
     api
       .getStatus()
       .then((status) => {
+        setFeatures(status.features ?? []);
+        setActiveFeature(status.active_feature ?? null);
         if (status.model_loaded) {
           setModelStatus({
             status: "loaded",
@@ -81,8 +91,12 @@ export default function App() {
       })
       .catch(() => {});
     api.getSkus().then(setSkus).catch(() => {});
-    api.getStats().then(setStats).catch(() => {});
   }, []);
+
+  // Keep stats scoped to the current SKU and active Feature.
+  useEffect(() => {
+    api.getStats(selectedSku, activeFeature).then(setStats).catch(() => {});
+  }, [selectedSku, activeFeature]);
 
   // When the SKU changes, load its images and clear any prior selection/results.
   useEffect(() => {
@@ -92,12 +106,12 @@ export default function App() {
     }
     setImagesLoading(true);
     setImages([]);
+    setUploadedFiles({});
     setSelectedPath(null);
     setOriginalSrc(null);
     setInferResult(null);
     setInferError(null);
     setVerdicts({});
-    api.getStats(selectedSku).then(setStats).catch(() => {});
     api
       .getSkuImages(selectedSku)
       .then(setImages)
@@ -109,6 +123,34 @@ export default function App() {
     setModelStatus(result);
   }, []);
 
+  const handleFeatureChange = useCallback(
+    async (feature: string) => {
+      if (feature === activeFeature || featureSwitching) return;
+      setFeatureSwitching(true);
+      setInferError(null);
+      try {
+        const res = await api.setFeature(feature);
+        setActiveFeature(res.active_feature);
+        setModelStatus({
+          status: "loaded",
+          runtime: res.runtime,
+          input_shape: res.input_shape,
+          model_version: res.model_version,
+        });
+        // A different Feature means different result shapes — clear prior output.
+        setInferResult(null);
+        setSelectedPath(null);
+        setOriginalSrc(null);
+        setVerdicts({});
+      } catch (e) {
+        setInferError(e instanceof Error ? e.message : "Failed to switch feature.");
+      } finally {
+        setFeatureSwitching(false);
+      }
+    },
+    [activeFeature, featureSwitching]
+  );
+
   const handleResetDatabase = useCallback(async () => {
     const confirmed = window.confirm(
       "Erase all recorded inspections? This clears the data used for reports and cannot be undone."
@@ -117,7 +159,7 @@ export default function App() {
     setResetting(true);
     try {
       await api.resetDatabase();
-      setStats(await api.getStats(selectedSku));
+      setStats(await api.getStats(selectedSku, activeFeature));
       setInferResult(null);
       setSelectedPath(null);
       setOriginalSrc(null);
@@ -128,19 +170,23 @@ export default function App() {
     } finally {
       setResetting(false);
     }
-  }, [selectedSku]);
+  }, [selectedSku, activeFeature]);
 
   async function runInferByPath(path: string) {
     if (!modelLoaded || !selectedSku || inferringKey) return;
+    const uploaded = uploadedFiles[path];
+    const image = images.find((i) => i.path === path);
     setSelectedPath(path);
-    setOriginalSrc(api.imageUrl(path));
+    setOriginalSrc(uploaded ? image?.url ?? null : api.imageUrl(path));
     setInferError(null);
     setInferringKey(path);
     try {
-      const result = await api.inferByPath(path, selectedSku, threshold, customerName);
+      const result = uploaded
+        ? await api.infer(uploaded, selectedSku, threshold, customerName)
+        : await api.inferByPath(path, selectedSku, threshold, customerName);
       setInferResult(result);
       setVerdicts((v) => ({ ...v, [path]: result.verdict }));
-      setStats(await api.getStats(selectedSku));
+      setStats(await api.getStats(selectedSku, activeFeature));
     } catch (e) {
       setInferError(e instanceof Error ? e.message : "Inference failed.");
     } finally {
@@ -148,21 +194,34 @@ export default function App() {
     }
   }
 
-  async function runInferUpload(file: File) {
-    if (!modelLoaded || !selectedSku || inferringKey) return;
-    setSelectedPath(null);
-    setOriginalSrc(URL.createObjectURL(file));
-    setInferError(null);
-    setInferringKey(UPLOAD_KEY);
-    try {
-      const result = await api.infer(file, selectedSku, threshold, customerName);
-      setInferResult(result);
-      setStats(await api.getStats(selectedSku));
-    } catch (e) {
-      setInferError(e instanceof Error ? e.message : "Inference failed.");
-    } finally {
-      setInferringKey(null);
+  // Populate the gallery from a locally-selected folder. The images live in the
+  // browser (not the dataset), so each gets a synthetic path and an object URL
+  // for its thumbnail; inference uploads the underlying File.
+  function handleUploadDirectory(files: FileList) {
+    if (!selectedSku) return;
+    const picked = Array.from(files).filter((f) =>
+      /\.(png|jpe?g|bmp)$/i.test(f.name)
+    );
+    if (picked.length === 0) {
+      setInferError("No images found in the selected folder.");
+      return;
     }
+    const fileMap: Record<string, File> = {};
+    const uploadedImages: DatasetImage[] = picked.map((f) => {
+      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
+      const path = `__upload__/${rel}`;
+      const parts = rel.split("/");
+      const category = parts.length > 1 ? parts[parts.length - 2] : "Uploaded";
+      fileMap[path] = f;
+      return { path, category, name: f.name, url: URL.createObjectURL(f) };
+    });
+    setUploadedFiles(fileMap);
+    setImages(uploadedImages);
+    setSelectedPath(null);
+    setOriginalSrc(null);
+    setInferResult(null);
+    setInferError(null);
+    setVerdicts({});
   }
 
   return (
@@ -222,10 +281,15 @@ export default function App() {
             threshold={threshold}
             customerName={customerName}
             modelLoaded={modelLoaded}
+            features={features}
+            activeFeature={activeFeature}
+            featureSwitching={featureSwitching}
+            thresholdLabel={thresholdLabel}
+            onFeatureChange={handleFeatureChange}
             onSkuChange={setSelectedSku}
             onThresholdChange={setThreshold}
             onCustomerChange={setCustomerName}
-            onUpload={runInferUpload}
+            onUploadDirectory={handleUploadDirectory}
           />
           <div className="mt-auto border-t border-gray-200 p-4">
             <StatsPanel stats={stats} skuName={selectedSku} onReset={handleResetDatabase} resetting={resetting} />
@@ -276,7 +340,8 @@ export default function App() {
 
           <VerdictBadge
             verdict={inferResult?.verdict ?? null}
-            anomalyScore={inferResult?.anomaly_score ?? null}
+            score={inferResult?.anomaly_score ?? null}
+            scoreLabel="Anomaly Score"
           />
 
           {inferError && (
@@ -286,9 +351,12 @@ export default function App() {
           )}
 
           <ResultsDisplay
+            feature={resultFeature}
             originalPreview={originalSrc}
             heatmap={inferResult?.heatmap_image ?? null}
             segmentation={inferResult?.segmentation_image ?? null}
+            annotated={inferResult?.annotated_image ?? null}
+            detections={inferResult?.detections ?? null}
           />
         </section>
       </main>

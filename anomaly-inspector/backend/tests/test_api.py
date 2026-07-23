@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 from database.models import Base
 from database.db import get_db
 import inference.engine as _engine
+import inference.features as _features
 
 
 def _make_png_bytes(size=64) -> bytes:
@@ -22,8 +23,9 @@ def _make_png_bytes(size=64) -> bytes:
 def client():
     from main import app
 
-    # Reset model session before each test to avoid state leakage
+    # Reset model + active-Feature state before each test to avoid leakage
     _engine._current_session = None
+    _features.reset()
 
     test_engine = create_engine(
         "sqlite:///:memory:",
@@ -49,6 +51,7 @@ def client():
     app.dependency_overrides.clear()
     # Reset model session after each test
     _engine._current_session = None
+    _features.reset()
 
 
 @pytest.fixture
@@ -197,3 +200,128 @@ def test_report_scoped_to_customer(client, loaded_model):
         },
     )
     assert resp.status_code == 404
+
+
+# ── Feature switching + Presence/Absence ─────────────────────────────────────
+
+def _mock_detector_session(favored_class=0, num_classes=3):
+    """Mock RF-DETR session: one confident query on `favored_class`."""
+    session = MagicMock()
+    logits = np.full((1, 2, num_classes), -5.0, dtype=np.float32)
+    logits[0, 0, favored_class] = 5.0
+    boxes = np.array([[[0.5, 0.5, 0.4, 0.4], [0.5, 0.5, 0.4, 0.4]]], dtype=np.float32)
+    session.run.return_value = [logits, boxes]
+    return session
+
+
+@pytest.fixture
+def presence_active(client):
+    """Activate Presence/Absence with a mock detector, via the real endpoint."""
+    from inference.engine import ModelSession
+    from inference.rfdetr import PresenceConfig
+
+    sess = ModelSession(
+        session=_mock_detector_session(favored_class=0),
+        runtime="cpu",
+        input_name="input",
+        input_shape=(20, 20),
+        model_version="rfdetr-nano",
+    )
+    cfg = PresenceConfig(
+        labels={0: "gasket", 1: "no-gasket", 2: "background"},
+        input_size=(20, 20),
+        expected_classes=[0],
+    )
+
+    def fake_activate(feature):
+        _engine._current_session = sess
+        _features._active_feature = feature
+        _features._presence_config = cfg
+        return sess
+
+    with patch("main.features.activate", side_effect=fake_activate):
+        resp = client.post("/api/feature", data={"feature": "presence_absence"})
+    assert resp.status_code == 200
+    return sess
+
+
+def test_status_reports_active_feature_and_catalog(client, loaded_model):
+    body = client.get("/api/status").json()
+    assert body["active_feature"] == "anomaly_detection"
+    # The Feature catalog drives the UI selector.
+    names = {f["name"] for f in body["features"]}
+    assert {"anomaly_detection", "presence_absence"} <= names
+
+
+def test_feature_switch_activates_presence(client, presence_active):
+    body = client.get("/api/status").json()
+    assert body["active_feature"] == "presence_absence"
+
+
+def test_feature_unknown_returns_400(client):
+    resp = client.post("/api/feature", data={"feature": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_presence_infer_returns_feature_shaped_payload(client, presence_active):
+    resp = client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-P", "threshold": "0.5"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["feature"] == "presence_absence"
+    assert body["verdict"] == "ok"  # gasket present
+    assert body["annotated_image"].startswith("/9j/")
+    assert body["detections"] and body["detections"][0]["label"] == "gasket"
+    # No anomaly-specific fields for this Feature.
+    assert body["anomaly_score"] is None
+
+
+def test_presence_infer_nok_when_gasket_absent(client):
+    from inference.engine import ModelSession
+    from inference.rfdetr import PresenceConfig
+
+    sess = ModelSession(
+        session=_mock_detector_session(favored_class=1),  # no-gasket
+        runtime="cpu",
+        input_name="input",
+        input_shape=(20, 20),
+        model_version="rfdetr-nano",
+    )
+    cfg = PresenceConfig(
+        labels={0: "gasket", 1: "no-gasket", 2: "background"},
+        input_size=(20, 20),
+        expected_classes=[0],
+    )
+
+    def fake_activate(feature):
+        _engine._current_session = sess
+        _features._active_feature = feature
+        _features._presence_config = cfg
+        return sess
+
+    with patch("main.features.activate", side_effect=fake_activate):
+        client.post("/api/feature", data={"feature": "presence_absence"})
+
+    resp = client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-P", "threshold": "0.5"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["verdict"] == "not_ok"
+
+
+def test_presence_stats_scoped_to_feature(client, presence_active):
+    client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-P", "threshold": "0.5"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    body = client.get("/api/stats?feature=presence_absence").json()
+    assert body["total"] == 1
+    assert body["ok"] == 1
+    # Anomaly feature has no records.
+    assert client.get("/api/stats?feature=anomaly_detection").json()["total"] == 0

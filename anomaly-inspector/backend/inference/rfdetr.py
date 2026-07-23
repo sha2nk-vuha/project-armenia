@@ -50,6 +50,10 @@ class PresenceConfig:
     mean: tuple[float, float, float] = _IMAGENET_MEAN
     std: tuple[float, float, float] = _IMAGENET_STD
     normalize: bool = True  # False when normalisation is baked into the graph
+    # Default Expected Class policy for the model: the class ids that must be
+    # present for an OK verdict. Overridable per-SKU (persisted) later; empty
+    # means "no policy configured" (see evaluate_presence).
+    expected_classes: list[int] = field(default_factory=list)
 
 
 def sidecar_path(model_path: str) -> str:
@@ -79,12 +83,14 @@ def load_config(path: str) -> PresenceConfig:
     input_size = data.get("input_size")
     mean = data.get("mean")
     std = data.get("std")
+    expected = data.get("expected_classes")
     return PresenceConfig(
         labels=labels,
         input_size=tuple(input_size) if input_size else defaults.input_size,
         mean=tuple(mean) if mean else defaults.mean,
         std=tuple(std) if std else defaults.std,
         normalize=data.get("normalize", defaults.normalize),
+        expected_classes=[int(c) for c in expected] if expected else [],
     )
 
 

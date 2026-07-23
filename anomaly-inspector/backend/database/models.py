@@ -13,10 +13,16 @@ class Inspection(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     sku_name = Column(String, nullable=False)
-    anomaly_score = Column(Float, nullable=False)
+    # The active Feature that produced this record (see docs/adr/0004).
+    feature = Column(
+        String, nullable=False, server_default="anomaly_detection", default="anomaly_detection"
+    )
+    # Anomaly-only scalar; NULL for Features without a single score (Presence/Absence).
+    anomaly_score = Column(Float, nullable=True)
     threshold = Column(Float, nullable=False)
     verdict = Column(String, nullable=False)
     model_version = Column(String, nullable=False)
     customer_name = Column(String, nullable=False, server_default="", default="")
-    heatmap_image = Column(LargeBinary, nullable=False)
-    segmentation_image = Column(LargeBinary, nullable=False)
+    # Feature-specific visualizations; NULL when a Feature does not produce them.
+    heatmap_image = Column(LargeBinary, nullable=True)
+    segmentation_image = Column(LargeBinary, nullable=True)

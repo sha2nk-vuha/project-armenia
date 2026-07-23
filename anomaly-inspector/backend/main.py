@@ -1,4 +1,5 @@
 import base64
+import io
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -7,17 +8,16 @@ from pathlib import Path
 from config import (
     APP_VERSION,
     DATA_ROOT,
-    DEFAULT_MODEL_PATH,
-    DEFAULT_MODEL_VERSION,
+    DEFAULT_FEATURE,
+    FEATURES,
 )
 from database import crud
 from database.db import get_db, init_db
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from inference import engine
-from inference.preprocessor import preprocess
-from inference.visualizer import generate_heatmap, generate_segmentation
+from inference import engine, features
+from PIL import Image
 from reports.pdf_generator import generate_report
 from sqlalchemy.orm import Session
 
@@ -40,24 +40,25 @@ def startup() -> None:
 
 
 def _load_default_model() -> None:
-    """Auto-load the bundled model so the app is usable without a manual upload."""
+    """Activate the startup default Feature so the app is usable immediately.
+
+    Loads that Feature's bundled model (Anomaly Detection by default). Missing
+    files are logged, not fatal — the operator can switch Features / upload a
+    model from the UI.
+    """
     if engine.get_session() is not None:
         return
-    if not DEFAULT_MODEL_PATH.exists():
-        logging.warning(
-            "Default model not found at %s; load one via /api/load-model.", DEFAULT_MODEL_PATH
-        )
-        return
     try:
-        sess = engine.load_model_from_path(str(DEFAULT_MODEL_PATH), DEFAULT_MODEL_VERSION)
+        sess = features.activate(DEFAULT_FEATURE)
         logging.info(
-            "Default model loaded: version=%s runtime=%s input_shape=%s",
+            "Default Feature '%s' active: version=%s runtime=%s input_shape=%s",
+            DEFAULT_FEATURE,
             sess.model_version,
             sess.runtime,
             sess.input_shape,
         )
-    except Exception as e:
-        logging.error("Failed to load default model from %s: %s", DEFAULT_MODEL_PATH, e)
+    except (FileNotFoundError, ValueError) as e:
+        logging.warning("Could not activate default Feature '%s': %s", DEFAULT_FEATURE, e)
 
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
@@ -111,13 +112,52 @@ def get_image(path: str):
     return FileResponse(_resolve_data_path(path))
 
 
+def _feature_catalog() -> list[dict]:
+    """The selectable Features and their UI metadata (labels, threshold naming)."""
+    return [
+        {
+            "name": name,
+            "label": spec["label"],
+            "threshold_label": spec["threshold_label"],
+        }
+        for name, spec in FEATURES.items()
+    ]
+
+
 @app.get("/api/status")
 def get_status():
+    catalog = _feature_catalog()
     sess = engine.get_session()
     if sess is None:
-        return {"model_loaded": False}
+        return {
+            "model_loaded": False,
+            "active_feature": features.get_active_feature(),
+            "features": catalog,
+        }
     return {
         "model_loaded": True,
+        "model_version": sess.model_version,
+        "runtime": sess.runtime,
+        "input_shape": list(sess.input_shape),
+        "active_feature": features.get_active_feature(),
+        "features": catalog,
+    }
+
+
+@app.post("/api/feature")
+def set_feature(feature: str = Form(...)):
+    """Activate an inspection Feature, loading its default model (swaps session)."""
+    if feature not in FEATURES:
+        raise HTTPException(status_code=400, detail=f"Unknown feature: {feature!r}")
+    try:
+        sess = features.activate(feature)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid model sidecar: {e}")
+    return {
+        "status": "activated",
+        "active_feature": feature,
         "model_version": sess.model_version,
         "runtime": sess.runtime,
         "input_shape": list(sess.input_shape),
@@ -128,17 +168,23 @@ def get_status():
 async def load_model(
     model_file: UploadFile = File(...),
     model_version: str = Form(...),
+    feature: str = Form(""),
 ):
+    target_feature = feature or features.get_active_feature() or DEFAULT_FEATURE
+    if target_feature not in FEATURES:
+        raise HTTPException(status_code=400, detail=f"Unknown feature: {target_feature!r}")
     model_bytes = await model_file.read()
     try:
         sess = engine.load_model(model_bytes, model_file.filename or "model.onnx", model_version)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    features.register_upload(target_feature)
     return {
         "status": "loaded",
         "runtime": sess.runtime,
         "input_shape": list(sess.input_shape),
         "model_version": sess.model_version,
+        "active_feature": target_feature,
     }
 
 
@@ -151,8 +197,8 @@ async def infer(
     image_path: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    sess = engine.get_session()
-    if sess is None:
+    pipeline = features.current_pipeline()
+    if pipeline is None:
         raise HTTPException(status_code=400, detail="No model loaded. Load a model first.")
 
     # Image source: an uploaded file, or a path into the on-disk dataset.
@@ -162,47 +208,58 @@ async def infer(
         image_bytes = _resolve_data_path(image_path).read_bytes()
     else:
         raise HTTPException(status_code=400, detail="Provide an image file or image_path.")
+
     try:
-        tensor, original_rgb = preprocess(image_bytes, sess.input_shape)
+        Image.open(io.BytesIO(image_bytes)).verify()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid or unsupported image file.")
 
     try:
-        anomaly_map, pred_score = engine.run_inference(tensor)
+        result = pipeline.infer(image_bytes, threshold)
     except (IndexError, ValueError):
         raise HTTPException(
             status_code=422,
-            detail="Model output format unexpected. Expected anomaly_map at index 0 and pred_score at index 1.",
+            detail="Model output format unexpected for the active Feature.",
         )
 
-    verdict = "ok" if pred_score < threshold else "not_ok"
-
-    heatmap_bytes = generate_heatmap(anomaly_map, original_rgb)
-    segmentation_bytes = generate_segmentation(anomaly_map, original_rgb, threshold)
+    heatmap_bytes = result.images.get("heatmap")
+    segmentation_bytes = result.images.get("segmentation")
+    annotated_bytes = result.images.get("annotated")
 
     crud.create_inspection(
         db,
         sku_name=sku_name,
-        anomaly_score=pred_score,
+        feature=pipeline.feature,
+        anomaly_score=result.score,
         threshold=threshold,
-        verdict=verdict,
-        model_version=sess.model_version,
+        verdict=result.verdict,
+        model_version=pipeline.model_version,
         customer_name=customer_name,
         heatmap_image=heatmap_bytes,
         segmentation_image=segmentation_bytes,
     )
 
+    def _b64(b: bytes | None) -> str | None:
+        return base64.b64encode(b).decode() if b is not None else None
+
     return {
-        "verdict": verdict,
-        "anomaly_score": round(pred_score, 4),
-        "heatmap_image": base64.b64encode(heatmap_bytes).decode(),
-        "segmentation_image": base64.b64encode(segmentation_bytes).decode(),
+        "feature": pipeline.feature,
+        "verdict": result.verdict,
+        "anomaly_score": round(result.score, 4) if result.score is not None else None,
+        "heatmap_image": _b64(heatmap_bytes),
+        "segmentation_image": _b64(segmentation_bytes),
+        "annotated_image": _b64(annotated_bytes),
+        "detections": result.detections,
     }
 
 
 @app.get("/api/stats")
-def get_stats(sku_name: str | None = None, db: Session = Depends(get_db)):
-    return crud.get_stats(db, sku_name=sku_name or None)
+def get_stats(
+    sku_name: str | None = None,
+    feature: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return crud.get_stats(db, sku_name=sku_name or None, feature=feature or None)
 
 
 @app.post("/api/reset")

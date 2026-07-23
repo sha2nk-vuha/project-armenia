@@ -161,3 +161,33 @@ def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
     # Unspecified fields fall back to RF-DETR defaults.
     assert config.mean == PresenceConfig().mean
     assert config.normalize == PresenceConfig().normalize
+
+
+def test_load_config_reads_expected_classes(tmp_path):
+    import json
+    from inference.rfdetr import load_config
+
+    sidecar = tmp_path / "with-expected.json"
+    sidecar.write_text(json.dumps({
+        "labels": {"0": "gasket", "1": "no-gasket", "2": "background"},
+        "expected_classes": [0],
+    }))
+
+    config = load_config(str(sidecar))
+
+    # The Expected Class policy default for this model: gasket must be present.
+    assert config.expected_classes == [0]
+
+
+def test_load_config_defaults_expected_classes_to_empty(tmp_path):
+    import json
+    from inference.rfdetr import load_config
+
+    sidecar = tmp_path / "no-expected.json"
+    sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))
+
+    config = load_config(str(sidecar))
+
+    # Absent -> empty; the pipeline treats "no expected classes configured"
+    # as a distinct case rather than a trivially-OK verdict.
+    assert config.expected_classes == []
