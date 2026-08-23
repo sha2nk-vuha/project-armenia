@@ -19,12 +19,11 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from inference.graph_probe import GraphPreprocessing
+from inference.preprocessor import IMAGENET_MEAN, IMAGENET_STD
+
 logger = logging.getLogger(__name__)
 
-
-# Standard ImageNet normalisation, the RF-DETR default. Overridable via sidecar.
-_IMAGENET_MEAN = (0.485, 0.456, 0.406)
-_IMAGENET_STD = (0.229, 0.224, 0.225)
 _DEFAULT_INPUT_SIZE = (384, 384)
 
 
@@ -43,13 +42,18 @@ class PresenceConfig:
 
     Carries the Class Catalog plus the RF-DETR preprocessing parameters. Fields
     left unset fall back to RF-DETR defaults so the common case is zero-config.
+
+    `scale` and `normalize` are tri-state: None (the default) defers to what the
+    ONNX graph was probed to do, while an explicit true/false in the sidecar
+    overrides the probe for exports it reads wrongly.
     """
 
     labels: dict[int, str] = field(default_factory=dict)
     input_size: tuple[int, int] = _DEFAULT_INPUT_SIZE  # (height, width)
-    mean: tuple[float, float, float] = _IMAGENET_MEAN
-    std: tuple[float, float, float] = _IMAGENET_STD
-    normalize: bool = True  # False when normalisation is baked into the graph
+    mean: tuple[float, float, float] = IMAGENET_MEAN
+    std: tuple[float, float, float] = IMAGENET_STD
+    scale: bool | None = None      # apply the [0,255] -> [0,1] rescale
+    normalize: bool | None = None  # apply mean/std normalisation
     # Default Expected Class policy for the model: the class ids that must be
     # present for an OK verdict. Overridable per-SKU (persisted) later; empty
     # means "no policy configured" (see evaluate_presence).
@@ -89,9 +93,15 @@ def load_config(path: str) -> PresenceConfig:
         input_size=tuple(input_size) if input_size else defaults.input_size,
         mean=tuple(mean) if mean else defaults.mean,
         std=tuple(std) if std else defaults.std,
-        normalize=data.get("normalize", defaults.normalize),
+        scale=_tristate(data.get("scale")),
+        normalize=_tristate(data.get("normalize")),
         expected_classes=[int(c) for c in expected] if expected else [],
     )
+
+
+def _tristate(value) -> bool | None:
+    """A sidecar override: None when the key is absent, else an explicit bool."""
+    return None if value is None else bool(value)
 
 
 def evaluate_presence(
@@ -115,27 +125,38 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 
 
 def preprocess_image(
-    image_bytes: bytes, config: PresenceConfig
+    image_bytes: bytes,
+    config: PresenceConfig,
+    graph: GraphPreprocessing | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Resize, scale, and (optionally) normalise an image for RF-DETR.
+    """Resize, and apply whichever of scaling/normalisation the graph omits.
 
-    Returns (tensor [1,3,H,W] float32, original_rgb [H,W,3] uint8). Unlike the
-    Anomalib preprocessor, RF-DETR normalisation is applied here (mean/std) when
-    `config.normalize` is set; disable it if the export bakes normalisation in.
+    Returns (tensor [1,3,H,W] float32, original_rgb [H,W,3] uint8). Each step
+    runs only if the model's own graph was probed not to do it (see
+    inference.graph_probe), unless the sidecar states an explicit override.
+    Exports vary: stock RF-DETR expects mean/std here, others bake it in.
     """
+    graph = graph or GraphPreprocessing()
+    do_scale = config.scale if config.scale is not None else graph.needs_scaling
+    do_normalize = (
+        config.normalize if config.normalize is not None else graph.needs_normalization
+    )
+
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     original_rgb = np.array(image, dtype=np.uint8)
 
     h, w = config.input_size
     resized = cv2.resize(original_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
-    scaled = resized.astype(np.float32) / 255.0
 
-    if config.normalize:
+    tensor = resized.astype(np.float32)
+    if do_scale:
+        tensor /= 255.0
+    if do_normalize:
         mean = np.array(config.mean, dtype=np.float32)
         std = np.array(config.std, dtype=np.float32)
-        scaled = (scaled - mean) / std
+        tensor = (tensor - mean) / std
 
-    tensor = scaled.transpose(2, 0, 1)[np.newaxis]  # [1, 3, H, W]
+    tensor = tensor.transpose(2, 0, 1)[np.newaxis]  # [1, 3, H, W]
     return tensor, original_rgb
 
 

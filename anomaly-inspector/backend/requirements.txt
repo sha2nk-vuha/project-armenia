@@ -2,6 +2,7 @@ fastapi==0.111.0
 uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 sqlalchemy==2.0.30
+onnx==1.16.1
 onnxruntime==1.18.0
 openvino==2024.1.0
 opencv-python==4.9.0.80

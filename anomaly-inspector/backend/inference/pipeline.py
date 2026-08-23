@@ -51,7 +51,9 @@ class AnomalyPipeline:
         return self.model.model_version
 
     def infer(self, image_bytes: bytes, threshold: float) -> InferenceResult:
-        tensor, original_rgb = preprocess(image_bytes, self.model.input_shape)
+        tensor, original_rgb = preprocess(
+            image_bytes, self.model.input_shape, self.model.graph_preprocessing
+        )
         anomaly_map, pred_score = engine.run_inference_on(self.model, tensor)
         verdict = "ok" if pred_score < threshold else "not_ok"
         heatmap = generate_heatmap(anomaly_map, original_rgb)
@@ -88,7 +90,9 @@ class PresenceAbsencePipeline:
         return self.model.model_version
 
     def infer(self, image_bytes: bytes, threshold: float) -> InferenceResult:
-        tensor, original_rgb = preprocess_image(image_bytes, self.config)
+        tensor, original_rgb = preprocess_image(
+            image_bytes, self.config, self.model.graph_preprocessing
+        )
         outputs = engine.run_raw(self.model, tensor)
         orig_h, orig_w = original_rgb.shape[:2]
         detections = decode_detections(outputs, (orig_h, orig_w), threshold, self.config)

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from inference.graph_probe import GraphPreprocessing, probe
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +22,10 @@ class ModelSession:
     # Index of the scalar image-score output. None → derive score from the
     # anomaly map's maximum (Anomalib's image score == max pixel score).
     score_idx: int | None = 1
+    # Which preprocessing steps this model's ONNX graph already performs, so
+    # pipelines apply only the ones it doesn't. Defaults to all-unknown, which
+    # every consumer resolves to the pre-probe behaviour.
+    graph_preprocessing: GraphPreprocessing = field(default_factory=GraphPreprocessing)
 
 
 _current_session: ModelSession | None = None
@@ -45,6 +51,9 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
     session, runtime = _select_runtime(model_bytes)
     input_name, input_shape = _get_onnx_meta(session) if runtime != "openvino" else _get_openvino_meta(session)
     output_names, map_idx, score_idx = _get_output_plan(session, runtime)
+    # Probed from the .onnx bytes rather than the loaded session, so the answer
+    # is the same whichever runtime (CUDA/OpenVINO/CPU) ends up executing it.
+    graph_preprocessing = probe(model_bytes)
 
     _current_session = ModelSession(
         session=session,
@@ -55,8 +64,14 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
         output_names=output_names,
         map_idx=map_idx,
         score_idx=score_idx,
+        graph_preprocessing=graph_preprocessing,
     )
-    logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
+    logger.info(
+        "Model loaded: runtime=%s input_shape=%s graph_preprocessing=%s",
+        runtime,
+        input_shape,
+        graph_preprocessing.detail,
+    )
     return _current_session
 
 

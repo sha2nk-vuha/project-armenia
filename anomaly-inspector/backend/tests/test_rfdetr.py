@@ -80,10 +80,10 @@ def _white_png(size=(10, 10)):
     return buf.tobytes()
 
 
-def test_preprocess_normalizes_and_shapes_tensor():
+def test_preprocess_normalizes_when_sidecar_asks_for_it():
     from inference.rfdetr import preprocess_image
 
-    config = PresenceConfig(input_size=(20, 20))
+    config = PresenceConfig(input_size=(20, 20), normalize=True)
     tensor, original = preprocess_image(_white_png((10, 10)), config)
 
     assert tensor.shape == (1, 3, 20, 20)
@@ -102,6 +102,52 @@ def test_preprocess_skips_normalization_when_disabled():
     # Only scaled to [0,1]; white stays 1.0.
     assert tensor.max() == pytest.approx(1.0, abs=1e-6)
     assert tensor.min() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_preprocess_defers_to_graph_probe_when_sidecar_is_silent():
+    from inference.graph_probe import GraphPreprocessing
+    from inference.rfdetr import preprocess_image
+
+    config = PresenceConfig(input_size=(20, 20))  # scale/normalize unset
+    bare_graph = GraphPreprocessing(scales=False, normalizes=False, detail="test")
+    tensor, _ = preprocess_image(_white_png((10, 10)), config, bare_graph)
+
+    # The graph does neither step, so both run here.
+    expected_r = (1.0 - config.mean[0]) / config.std[0]
+    assert tensor[0, 0].mean() == pytest.approx(expected_r, abs=1e-3)
+
+
+def test_preprocess_skips_steps_the_graph_already_performs():
+    from inference.graph_probe import GraphPreprocessing
+    from inference.rfdetr import preprocess_image
+
+    config = PresenceConfig(input_size=(20, 20))
+    full_graph = GraphPreprocessing(scales=True, normalizes=True, detail="test")
+    tensor, _ = preprocess_image(_white_png((10, 10)), config, full_graph)
+
+    # Neither step runs here; white stays at its raw 255.
+    assert tensor.max() == pytest.approx(255.0, abs=1e-6)
+
+
+def test_sidecar_overrides_the_graph_probe():
+    """An explicit sidecar value wins over what the probe read."""
+    from inference.graph_probe import GraphPreprocessing
+    from inference.rfdetr import preprocess_image
+
+    config = PresenceConfig(input_size=(20, 20), normalize=False)
+    bare_graph = GraphPreprocessing(scales=False, normalizes=False, detail="test")
+    tensor, _ = preprocess_image(_white_png((10, 10)), config, bare_graph)
+
+    assert tensor.max() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_unprobed_graph_skips_normalization():
+    """No probe result: assume the export bakes normalisation in."""
+    from inference.rfdetr import preprocess_image
+
+    tensor, _ = preprocess_image(_white_png((10, 10)), PresenceConfig(input_size=(20, 20)))
+
+    assert tensor.max() == pytest.approx(1.0, abs=1e-6)
 
 
 def test_draw_detections_returns_decodable_image():
@@ -160,7 +206,9 @@ def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
     assert config.labels == {0: "gasket"}
     # Unspecified fields fall back to RF-DETR defaults.
     assert config.mean == PresenceConfig().mean
-    assert config.normalize == PresenceConfig().normalize
+    # Absent, not false: the graph probe decides.
+    assert config.normalize is None
+    assert config.scale is None
 
 
 def test_load_config_reads_expected_classes(tmp_path):
@@ -191,3 +239,16 @@ def test_load_config_defaults_expected_classes_to_empty(tmp_path):
     # Absent -> empty; the pipeline treats "no expected classes configured"
     # as a distinct case rather than a trivially-OK verdict.
     assert config.expected_classes == []
+
+
+def test_load_config_reads_preprocessing_overrides(tmp_path):
+    import json
+    from inference.rfdetr import load_config
+
+    sidecar = tmp_path / "overrides.json"
+    sidecar.write_text(json.dumps({"scale": True, "normalize": False}))
+
+    config = load_config(str(sidecar))
+
+    assert config.scale is True
+    assert config.normalize is False
