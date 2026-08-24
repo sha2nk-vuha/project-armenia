@@ -20,6 +20,7 @@ DEFAULT_MODEL_VERSION = os.environ.get("DEFAULT_MODEL_VERSION", "dinomaly_s_mvte
 # the loaded model. See docs/adr/0001 and 0003.
 ANOMALY_FEATURE = "anomaly_detection"
 PRESENCE_FEATURE = "presence_absence"
+SEGMENTATION_FEATURE = "segmentation"
 DEFAULT_FEATURE = os.environ.get("DEFAULT_FEATURE", ANOMALY_FEATURE)
 
 # Per-Feature default model. `DEFAULT_MODEL_PATH`/`_VERSION` stay as the Anomaly
@@ -40,6 +41,21 @@ FEATURES: dict[str, dict] = {
             )
         ),
         "model_version": os.environ.get("PRESENCE_MODEL_VERSION", "rfdetr-nano"),
+    },
+    # The bundled segmentation export is customer-specific, so the path is an
+    # env override rather than a fixed generic default.
+    SEGMENTATION_FEATURE: {
+        "label": "Segmentation",
+        "threshold_label": "Detection Confidence",
+        "model_path": Path(
+            os.environ.get(
+                "SEGMENTATION_MODEL_PATH",
+                _REPO_ROOT / "model" / "three_cee_caps_rfdetr-seg-nano_v0.0.1.onnx",
+            )
+        ),
+        "model_version": os.environ.get(
+            "SEGMENTATION_MODEL_VERSION", "rfdetr-seg-nano-v0.0.1"
+        ),
     },
 }
 

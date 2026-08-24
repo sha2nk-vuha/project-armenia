@@ -218,7 +218,7 @@ def _mock_detector_session(favored_class=0, num_classes=3):
 def presence_active(client):
     """Activate Presence/Absence with a mock detector, via the real endpoint."""
     from inference.engine import ModelSession
-    from inference.rfdetr import PresenceConfig
+    from inference.rfdetr import ModelConfig
 
     sess = ModelSession(
         session=_mock_detector_session(favored_class=0),
@@ -227,16 +227,16 @@ def presence_active(client):
         input_shape=(20, 20),
         model_version="rfdetr-nano",
     )
-    cfg = PresenceConfig(
+    cfg = ModelConfig(
         labels={0: "gasket", 1: "no-gasket", 2: "background"},
         input_size=(20, 20),
-        expected_classes=[0],
+        rule_params={"expected_classes": {"expected_classes": [0]}},
     )
 
     def fake_activate(feature):
         _engine._current_session = sess
         _features._active_feature = feature
-        _features._presence_config = cfg
+        _features._model_config = cfg
         return sess
 
     with patch("main.features.activate", side_effect=fake_activate):
@@ -281,7 +281,7 @@ def test_presence_infer_returns_feature_shaped_payload(client, presence_active):
 
 def test_presence_infer_nok_when_gasket_absent(client):
     from inference.engine import ModelSession
-    from inference.rfdetr import PresenceConfig
+    from inference.rfdetr import ModelConfig
 
     sess = ModelSession(
         session=_mock_detector_session(favored_class=1),  # no-gasket
@@ -290,16 +290,16 @@ def test_presence_infer_nok_when_gasket_absent(client):
         input_shape=(20, 20),
         model_version="rfdetr-nano",
     )
-    cfg = PresenceConfig(
+    cfg = ModelConfig(
         labels={0: "gasket", 1: "no-gasket", 2: "background"},
         input_size=(20, 20),
-        expected_classes=[0],
+        rule_params={"expected_classes": {"expected_classes": [0]}},
     )
 
     def fake_activate(feature):
         _engine._current_session = sess
         _features._active_feature = feature
-        _features._presence_config = cfg
+        _features._model_config = cfg
         return sess
 
     with patch("main.features.activate", side_effect=fake_activate):

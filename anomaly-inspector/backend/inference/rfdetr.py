@@ -8,24 +8,22 @@ Confirmed against the rfdetr-nano export: input `[1,3,384,384]`, outputs
 `dets [1,300,4]` (normalised cxcywh boxes) and `labels [1,300,C]` (per-class
 logits; probabilities via sigmoid). The decode identifies boxes vs logits by
 shape, so output order does not matter.
+
+This two-output decode is detection-only. A segmentation export emits a third
+`masks` tensor and is decoded by `rfdetr_seg.py`; do not route it here — the
+shape-based split would take `masks` as the logits tensor.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import io
-import json
 import logging
-from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
 
+from inference.model_config import ModelConfig, load_config, sidecar_path  # noqa: F401
+
 logger = logging.getLogger(__name__)
-
-
-# Standard ImageNet normalisation, the RF-DETR default. Overridable via sidecar.
-_IMAGENET_MEAN = (0.485, 0.456, 0.406)
-_IMAGENET_STD = (0.229, 0.224, 0.225)
-_DEFAULT_INPUT_SIZE = (384, 384)
 
 
 @dataclass
@@ -37,69 +35,12 @@ class Detection:
     box: tuple[float, float, float, float]  # xyxy
 
 
-@dataclass
-class PresenceConfig:
-    """Model-scoped configuration, sourced from the model sidecar JSON.
-
-    Carries the Class Catalog plus the RF-DETR preprocessing parameters. Fields
-    left unset fall back to RF-DETR defaults so the common case is zero-config.
-    """
-
-    labels: dict[int, str] = field(default_factory=dict)
-    input_size: tuple[int, int] = _DEFAULT_INPUT_SIZE  # (height, width)
-    mean: tuple[float, float, float] = _IMAGENET_MEAN
-    std: tuple[float, float, float] = _IMAGENET_STD
-    normalize: bool = True  # False when normalisation is baked into the graph
-    # Default Expected Class policy for the model: seeds the params of the
-    # Expected Classes Decision Rule, which owns the verdict logic. Empty
-    # means "no policy configured" (every image passes).
-    expected_classes: list[int] = field(default_factory=list)
-
-
-def sidecar_path(model_path: str) -> str:
-    """The sidecar JSON path for a model: same directory and stem, `.json`.
-
-    e.g. `model/rfdetr-nano.onnx` -> `model/rfdetr-nano.json`.
-    """
-    return str(Path(model_path).with_suffix(".json"))
-
-
-def load_config(path: str) -> PresenceConfig:
-    """Load a `PresenceConfig` from a sidecar JSON, defaulting when absent.
-
-    The sidecar carries the Class Catalog (`labels`, index->name) and optional
-    preprocessing overrides. Missing files or fields fall back to RF-DETR
-    defaults so the Feature stays usable (with raw class indices) even without a
-    sidecar. JSON object keys are strings, so `labels` keys are coerced to int.
-    """
-    p = Path(path)
-    if not p.is_file():
-        logger.info("No RF-DETR sidecar at %s; using defaults (raw class indices).", path)
-        return PresenceConfig()
-
-    data = json.loads(p.read_text())
-    defaults = PresenceConfig()
-    labels = {int(k): str(v) for k, v in data.get("labels", {}).items()}
-    input_size = data.get("input_size")
-    mean = data.get("mean")
-    std = data.get("std")
-    expected = data.get("expected_classes")
-    return PresenceConfig(
-        labels=labels,
-        input_size=tuple(input_size) if input_size else defaults.input_size,
-        mean=tuple(mean) if mean else defaults.mean,
-        std=tuple(std) if std else defaults.std,
-        normalize=data.get("normalize", defaults.normalize),
-        expected_classes=[int(c) for c in expected] if expected else [],
-    )
-
-
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
 def preprocess_image(
-    image_bytes: bytes, config: PresenceConfig
+    image_bytes: bytes, config: ModelConfig
 ) -> tuple[np.ndarray, np.ndarray]:
     """Resize, scale, and (optionally) normalise an image for RF-DETR.
 
@@ -142,7 +83,7 @@ def decode_detections(
     outputs: list,
     orig_hw: tuple[int, int],
     conf_threshold: float,
-    config: PresenceConfig,
+    config: ModelConfig,
 ) -> list[Detection]:
     """Turn raw RF-DETR outputs into Detections in original-image pixels.
 

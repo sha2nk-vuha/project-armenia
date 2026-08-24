@@ -6,7 +6,7 @@ import inference.engine as engine
 import inference.features as features
 from config import ANOMALY_FEATURE, PRESENCE_FEATURE
 from inference.pipeline import AnomalyPipeline, PresenceAbsencePipeline
-from inference.rfdetr import PresenceConfig
+from inference.rfdetr import ModelConfig
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +46,10 @@ def test_activate_anomaly_loads_default_model_and_builds_pipeline():
 
 def test_activate_presence_loads_sidecar_and_builds_presence_pipeline():
     sess = _session("rfdetr")
-    cfg = PresenceConfig(labels={0: "gasket"}, expected_classes=[0])
+    cfg = ModelConfig(
+        labels={0: "gasket"},
+        rule_params={"expected_classes": {"expected_classes": [0]}},
+    )
     with patch("inference.features.engine.load_model_from_path", return_value=sess), \
          patch("inference.features.load_config", return_value=cfg):
         features.activate(PRESENCE_FEATURE)

@@ -67,7 +67,7 @@ def _mock_detector_session(favored_class=1, num_classes=2):
 
 def _presence_pipeline(expected_classes, favored_class=1):
     from inference.pipeline import PresenceAbsencePipeline
-    from inference.rfdetr import PresenceConfig
+    from inference.rfdetr import ModelConfig
 
     model = ModelSession(
         session=_mock_detector_session(favored_class),
@@ -76,7 +76,7 @@ def _presence_pipeline(expected_classes, favored_class=1):
         input_shape=(20, 20),
         model_version="rf-detr-test",
     )
-    config = PresenceConfig(input_size=(20, 20), labels={0: "bg", 1: "cap"})
+    config = ModelConfig(input_size=(20, 20), labels={0: "bg", 1: "cap"})
     return PresenceAbsencePipeline(model, config, expected_classes)
 
 
@@ -96,3 +96,87 @@ def test_presence_pipeline_nok_when_expected_class_absent():
     result = pipe.infer(_png_bytes(), threshold=0.5)
 
     assert result.verdict == "not_ok"
+
+
+def _mock_seg_session(num_queries=2, num_classes=3, mask_hw=(8, 8)):
+    """A mock segmentation ONNX: query 0 is a confident class-1 instance."""
+    session = MagicMock()
+    logits = np.full((1, num_queries, num_classes), -8.0, dtype=np.float32)
+    logits[0, 0, 1] = 8.0
+    boxes = np.tile(np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32), (1, num_queries, 1))
+    masks = np.full((1, num_queries, *mask_hw), -8.0, dtype=np.float32)
+    masks[0, 0, 2:6, 2:6] = 8.0
+    session.run.return_value = [boxes, logits, masks]
+    return session
+
+
+def _segmentation_pipeline(labels=None, rule_params=None):
+    from inference.model_config import ModelConfig
+    from inference.pipeline import SegmentationPipeline
+
+    model = ModelSession(
+        session=_mock_seg_session(),
+        runtime="cpu",
+        input_name="input",
+        input_shape=(32, 32),
+        model_version="seg-test",
+    )
+    config = ModelConfig(
+        input_size=(32, 32),
+        labels=labels if labels is not None else {0: "bottle_cap", 1: "logo"},
+        rule_params=rule_params or {},
+    )
+    return SegmentationPipeline(model, config)
+
+
+def test_segmentation_pipeline_advertises_both_output_kinds():
+    # The payoff of typing rules on output kind: masks *and* detections.
+    pipe = _segmentation_pipeline()
+    assert pipe.kinds == frozenset({"detections", "masks"})
+    assert "expected_classes" in {r.name for r in pipe.compatible_rules()}
+
+
+def test_segmentation_pipeline_runs_a_detection_rule_unchanged():
+    pipe = _segmentation_pipeline()
+    result = pipe.infer(
+        _png_bytes(), threshold=0.5, rule_params={"expected_classes": ["logo"]}
+    )
+
+    assert result.verdict == "ok"
+    assert result.decision_rule == "expected_classes"
+    assert isinstance(result.images["annotated"], bytes)
+
+
+def test_segmentation_pipeline_nok_when_expected_class_absent():
+    pipe = _segmentation_pipeline()
+    result = pipe.infer(
+        _png_bytes(), threshold=0.5, rule_params={"expected_classes": ["bottle_cap"]}
+    )
+    assert result.verdict == "not_ok"
+
+
+def test_segmentation_detections_carry_mask_area():
+    pipe = _segmentation_pipeline()
+    result = pipe.infer(_png_bytes(), threshold=0.5)
+
+    assert len(result.detections) == 1
+    det = result.detections[0]
+    assert det["label"] == "logo"
+    assert det["mask_area_px"] > 0
+
+
+def test_segmentation_sidecar_seeds_rule_params():
+    # Sidecar supplies defaults; the request may override them.
+    pipe = _segmentation_pipeline(
+        rule_params={"expected_classes": {"expected_classes": ["bottle_cap"]}}
+    )
+    assert pipe.infer(_png_bytes(), threshold=0.5).verdict == "not_ok"
+    assert pipe.infer(
+        _png_bytes(), threshold=0.5, rule_params={"expected_classes": ["logo"]}
+    ).verdict == "ok"
+
+
+def test_segmentation_rejects_an_incompatible_rule():
+    pipe = _segmentation_pipeline()
+    with pytest.raises(ValueError, match="anomaly_threshold"):
+        pipe.infer(_png_bytes(), threshold=0.5, rule_name="anomaly_threshold")

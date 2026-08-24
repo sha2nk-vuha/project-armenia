@@ -12,17 +12,20 @@ from inference import decision, engine
 from inference.decision.base import (
     KIND_ANOMALY_MAP,
     KIND_DETECTIONS,
+    KIND_MASKS,
     DecisionContext,
     DecodedOutput,
 )
 from inference.engine import ModelSession
 from inference.preprocessor import preprocess
 from inference.rfdetr import (
-    PresenceConfig,
+    Detection,
+    ModelConfig,
     decode_detections,
     draw_detections_rgb,
     preprocess_image,
 )
+from inference.rfdetr_seg import decode_instances, draw_instances_rgb
 from inference.visualizer import (
     encode_jpeg,
     generate_heatmap,
@@ -163,7 +166,7 @@ class AnomalyPipeline(_PipelineBase):
 class PresenceAbsencePipeline(_PipelineBase):
     """Presence/Absence: RF-DETR detections, judged by a Decision Rule.
 
-    Holds the model plus its model-scoped `PresenceConfig` (Class Catalog +
+    Holds the model plus its model-scoped `ModelConfig` (Class Catalog +
     preprocessing) and the SKU's `expected_classes`, which seeds the default
     params of the Expected Classes rule. The Threshold passed to `infer` is the
     detection-confidence floor.
@@ -176,7 +179,7 @@ class PresenceAbsencePipeline(_PipelineBase):
     def __init__(
         self,
         model: ModelSession,
-        config: PresenceConfig,
+        config: ModelConfig,
         expected_classes: list[int],
     ):
         self.model = model
@@ -228,6 +231,83 @@ class PresenceAbsencePipeline(_PipelineBase):
                     "box": [round(v, 1) for v in d.box],
                 }
                 for d in detections
+            ],
+            decision_rule=rule.name,
+            score_label=res.score_label,
+            metrics=res.metrics,
+            reason=res.reason,
+        )
+
+
+class SegmentationPipeline(_PipelineBase):
+    """Segmentation: RF-DETR per-instance masks, judged by a Decision Rule.
+
+    Advertises both `masks` and `detections`, so geometry rules and the existing
+    Expected Classes rule are equally selectable against it. The Threshold
+    passed to `infer` is the detection-confidence floor; the mask binarisation
+    cutoff comes from the model sidecar (see docs/adr/0005).
+    """
+
+    feature = "segmentation"
+    kinds = frozenset({KIND_DETECTIONS, KIND_MASKS})
+    default_rule = "expected_classes"
+
+    def __init__(self, model: ModelSession, config: ModelConfig):
+        self.model = model
+        self.config = config
+
+    @property
+    def labels(self) -> dict[int, str]:
+        return self.config.labels
+
+    def default_rule_params(self, rule_name: str) -> dict:
+        return self.config.rule_params.get(rule_name, {})
+
+    def _resolve_rule(self, rule_name: str | None):
+        return super()._resolve_rule(rule_name or self.config.default_rule)
+
+    def infer(
+        self,
+        image_bytes: bytes,
+        threshold: float,
+        rule_name: str | None = None,
+        rule_params: dict | None = None,
+    ) -> InferenceResult:
+        tensor, original_rgb = preprocess_image(image_bytes, self.config)
+        outputs = engine.run_raw(self.model, tensor)
+        orig_h, orig_w = original_rgb.shape[:2]
+        instances = decode_instances(outputs, (orig_h, orig_w), threshold, self.config)
+        output = DecodedOutput(
+            kinds=self.kinds,
+            image_hw=(orig_h, orig_w),
+            instances=instances,
+            # Masks carry boxes too, so detection-only rules run unchanged.
+            detections=[
+                Detection(class_id=i.class_id, confidence=i.confidence, box=i.box)
+                for i in instances
+            ],
+        )
+        rule, res = self._decide(
+            rule_name, rule_params, output, original_rgb, threshold
+        )
+
+        # Masks first, then the rule's own geometry on top, then one encode.
+        canvas = draw_instances_rgb(original_rgb, instances, self.config.labels)
+        annotated = encode_jpeg(render_annotations(canvas, res.annotations))
+
+        return InferenceResult(
+            verdict=res.verdict,
+            score=res.score,
+            images={"annotated": annotated},
+            detections=[
+                {
+                    "class_id": i.class_id,
+                    "label": self.config.labels.get(i.class_id, str(i.class_id)),
+                    "confidence": round(i.confidence, 4),
+                    "box": [round(v, 1) for v in i.box],
+                    "mask_area_px": int(i.mask.sum()),
+                }
+                for i in instances
             ],
             decision_rule=rule.name,
             score_label=res.score_label,

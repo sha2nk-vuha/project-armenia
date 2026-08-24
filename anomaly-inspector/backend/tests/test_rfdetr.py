@@ -3,7 +3,7 @@ import pytest
 
 from inference.rfdetr import (
     Detection,
-    PresenceConfig,
+    ModelConfig,
     decode_detections,
 )
 
@@ -78,7 +78,7 @@ def test_decode_filters_by_confidence_and_scales_boxes():
     )  # [1, 2, 4]
 
     dets = decode_detections(
-        [logits, boxes], orig_hw=(100, 200), conf_threshold=0.5, config=PresenceConfig()
+        [logits, boxes], orig_hw=(100, 200), conf_threshold=0.5, config=ModelConfig()
     )
 
     assert len(dets) == 1
@@ -95,7 +95,7 @@ def test_decode_handles_swapped_output_order():
     boxes = np.array([[[0.5, 0.5, 0.5, 0.5]]], dtype=np.float32)  # [1, 1, 4]
 
     dets = decode_detections(
-        [boxes, logits], orig_hw=(100, 100), conf_threshold=0.5, config=PresenceConfig()
+        [boxes, logits], orig_hw=(100, 100), conf_threshold=0.5, config=ModelConfig()
     )
 
     assert len(dets) == 1
@@ -112,7 +112,7 @@ def _white_png(size=(10, 10)):
 def test_preprocess_normalizes_and_shapes_tensor():
     from inference.rfdetr import preprocess_image
 
-    config = PresenceConfig(input_size=(20, 20))
+    config = ModelConfig(input_size=(20, 20))
     tensor, original = preprocess_image(_white_png((10, 10)), config)
 
     assert tensor.shape == (1, 3, 20, 20)
@@ -125,7 +125,7 @@ def test_preprocess_normalizes_and_shapes_tensor():
 def test_preprocess_skips_normalization_when_disabled():
     from inference.rfdetr import preprocess_image
 
-    config = PresenceConfig(input_size=(20, 20), normalize=False)
+    config = ModelConfig(input_size=(20, 20), normalize=False)
     tensor, _ = preprocess_image(_white_png((10, 10)), config)
 
     # Only scaled to [0,1]; white stays 1.0.
@@ -179,7 +179,7 @@ def test_load_config_falls_back_to_defaults_when_absent(tmp_path):
 
 def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
     import json
-    from inference.rfdetr import load_config, PresenceConfig
+    from inference.rfdetr import load_config, ModelConfig
 
     sidecar = tmp_path / "labels-only.json"
     sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))
@@ -188,8 +188,8 @@ def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
 
     assert config.labels == {0: "gasket"}
     # Unspecified fields fall back to RF-DETR defaults.
-    assert config.mean == PresenceConfig().mean
-    assert config.normalize == PresenceConfig().normalize
+    assert config.mean == ModelConfig().mean
+    assert config.normalize == ModelConfig().normalize
 
 
 def test_load_config_reads_expected_classes(tmp_path):
