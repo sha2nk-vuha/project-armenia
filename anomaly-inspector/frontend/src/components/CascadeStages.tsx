@@ -40,14 +40,19 @@ export function CascadeStages({ stages }: { stages: StageResult[] }) {
 function StageImages({ images }: { images: LabelledImage[] }) {
   const shown = images.filter((im) => im.image);
   if (shown.length === 0) return null;
+  // Auto-fit grid: each image fills the stage width (≈3x the old thumbnail) and
+  // only pairs up side by side once the resizable Result panel is wide enough.
   return (
-    <div className="mt-2 ml-6 flex flex-wrap gap-2">
+    <div
+      className="mt-2 ml-6 grid gap-3"
+      style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))" }}
+    >
       {shown.map((im, i) => (
         <figure key={i} className="flex flex-col gap-1">
           <img
             src={`data:image/jpeg;base64,${im.image}`}
             alt={im.label}
-            className="max-h-40 rounded-lg border border-gray-200 object-contain"
+            className="w-full rounded-lg border border-gray-200 object-contain"
           />
           <figcaption className="text-center text-[11px] text-gray-400">{im.label}</figcaption>
         </figure>
