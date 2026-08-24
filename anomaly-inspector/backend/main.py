@@ -39,29 +39,13 @@ app.add_middleware(
 @app.on_event("startup")
 def startup() -> None:
     init_db()
-    _load_default_model()
-
-
-def _load_default_model() -> None:
-    """Activate the startup default Feature so the app is usable immediately.
-
-    Loads that Feature's bundled model (Anomaly Detection by default). Missing
-    files are logged, not fatal — the operator can switch Features / upload a
-    model from the UI.
-    """
-    if engine.get_session() is not None:
-        return
+    # No model is auto-loaded (docs/adr/0007): the operator uploads one per
+    # Feature. Only the default *active* Feature is set so the UI has a starting
+    # selection; inference before an upload returns a clear "no model" error.
     try:
-        sess = features.activate(DEFAULT_FEATURE)
-        logging.info(
-            "Default Feature '%s' active: version=%s runtime=%s input_shape=%s",
-            DEFAULT_FEATURE,
-            sess.model_version,
-            sess.runtime,
-            sess.input_shape,
-        )
-    except (FileNotFoundError, ValueError) as e:
-        logging.warning("Could not activate default Feature '%s': %s", DEFAULT_FEATURE, e)
+        features.activate(DEFAULT_FEATURE)
+    except ValueError as e:
+        logging.warning("Could not set default Feature '%s': %s", DEFAULT_FEATURE, e)
 
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
@@ -130,20 +114,23 @@ def _feature_catalog() -> list[dict]:
 @app.get("/api/status")
 def get_status():
     catalog = _feature_catalog()
-    sess = engine.get_session()
+    # Per-Feature: which Features have an uploaded model. Drives both the single
+    # "Model" indicator (active Feature) and the per-stage cascade indicators.
+    loaded = features.loaded_models()
+    sess = features.active_model()
+    base = {
+        "active_feature": features.get_active_feature(),
+        "features": catalog,
+        "loaded_models": loaded,
+    }
     if sess is None:
-        return {
-            "model_loaded": False,
-            "active_feature": features.get_active_feature(),
-            "features": catalog,
-        }
+        return {**base, "model_loaded": False}
     return {
+        **base,
         "model_loaded": True,
         "model_version": sess.model_version,
         "runtime": sess.runtime,
         "input_shape": list(sess.input_shape),
-        "active_feature": features.get_active_feature(),
-        "features": catalog,
     }
 
 
@@ -153,20 +140,17 @@ def set_feature(feature: str = Form(...)):
     if feature not in FEATURES:
         raise HTTPException(status_code=400, detail=f"Unknown feature: {feature!r}")
     try:
-        sess = features.activate(feature)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        features.activate(feature)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid model sidecar: {e}")
-    # A cascade has no single model of its own; its members load per request.
-    if sess is None:
-        return {"status": "activated", "active_feature": feature, "composite": True}
+        raise HTTPException(status_code=422, detail=str(e))
+    # Activation loads no model (docs/adr/0007). Report whether one is already
+    # uploaded for this Feature so the UI shows the right state immediately.
+    model = features.loaded_models().get(feature)
     return {
         "status": "activated",
         "active_feature": feature,
-        "model_version": sess.model_version,
-        "runtime": sess.runtime,
-        "input_shape": list(sess.input_shape),
+        "model_loaded": model is not None,
+        "model": model,
     }
 
 
@@ -175,22 +159,44 @@ async def load_model(
     model_file: UploadFile = File(...),
     model_version: str = Form(...),
     feature: str = Form(""),
+    sidecar_file: UploadFile | None = File(None),
 ):
+    """Upload a model for a specific Feature (its own store slot).
+
+    `feature` names which Feature the model is for -- required in cascade mode,
+    where the active Feature is the composite. An optional `sidecar_file` (the
+    model's JSON) supplies its Class Catalog and rule defaults; without it the
+    bundled sidecar template is used and the input size is read from the model.
+    """
     target_feature = feature or features.get_active_feature() or DEFAULT_FEATURE
-    if target_feature not in FEATURES:
-        raise HTTPException(status_code=400, detail=f"Unknown feature: {target_feature!r}")
+    if target_feature not in FEATURES or target_feature == CASCADE_FEATURE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Upload a model for a concrete Feature, not {target_feature!r}.",
+        )
     model_bytes = await model_file.read()
+
+    sidecar = None
+    if sidecar_file is not None:
+        try:
+            sidecar = json.loads(await sidecar_file.read())
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail="Sidecar file is not valid JSON.")
+
     try:
-        sess = engine.load_model(model_bytes, model_file.filename or "model.onnx", model_version)
+        sess = features.upload_model(
+            target_feature, model_bytes, model_file.filename or "model.onnx",
+            model_version, sidecar,
+        )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    features.register_upload(target_feature)
     return {
         "status": "loaded",
         "runtime": sess.runtime,
         "input_shape": list(sess.input_shape),
         "model_version": sess.model_version,
-        "active_feature": target_feature,
+        "active_feature": features.get_active_feature(),
+        "feature": target_feature,
     }
 
 
@@ -603,7 +609,7 @@ def get_report(
             }
         )
 
-    current_sess = engine.get_session()
+    current_sess = features.active_model()
     model_version = current_sess.model_version if current_sess else "unknown"
 
     pdf_bytes = generate_report(

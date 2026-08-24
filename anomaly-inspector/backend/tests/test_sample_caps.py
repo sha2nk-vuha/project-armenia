@@ -25,6 +25,28 @@ pytestmark = pytest.mark.skipif(
 _SAMPLES = Path(__file__).resolve().parents[3] / "data" / "three_cee_caps" / "test"
 
 
+def _upload_bundled(feature):
+    """Upload a Feature's bundled model + sidecar into the per-Feature store.
+
+    Nothing auto-loads (docs/adr/0007), so these real-model tests upload the
+    bundled files the same way the GUI uploads an operator's model.
+    """
+    import json as _json
+
+    from config import FEATURES
+    from inference import features
+    from inference.model_config import sidecar_path
+
+    path = FEATURES[feature]["model_path"]
+    sidecar_path_str = sidecar_path(str(path))
+    sidecar = None
+    if Path(sidecar_path_str).is_file():
+        sidecar = _json.loads(Path(sidecar_path_str).read_text())
+    features.upload_model(
+        feature, path.read_bytes(), path.name, FEATURES[feature]["model_version"], sidecar
+    )
+
+
 def _labelled():
     for folder, expected in (("ok_case", "ok"), ("nok_case", "not_ok")):
         for path in sorted(glob.glob(str(_SAMPLES / folder / "*.png"))):
@@ -40,6 +62,8 @@ def pipeline():
         pytest.skip("segmentation model not present")
     if not _SAMPLES.is_dir():
         pytest.skip("sample caps not present")
+    features.reset()
+    _upload_bundled(SEGMENTATION_FEATURE)
     features.activate(SEGMENTATION_FEATURE)
     return features.current_pipeline()
 
@@ -95,6 +119,8 @@ def test_cascade_anomaly_and_segmentation_over_the_samples():
         pytest.skip("sample caps not present")
 
     features.reset()
+    _upload_bundled(ANOMALY_FEATURE)
+    _upload_bundled(SEGMENTATION_FEATURE)
     spec = {
         "combinator": "and",
         "short_circuit": False,  # evaluate both stages so we can inspect each

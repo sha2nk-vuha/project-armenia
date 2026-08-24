@@ -43,15 +43,26 @@ def client():
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    # Suppress startup auto-load of the bundled default model so each test
-    # controls model state explicitly (via the loaded_model fixture or not).
-    with patch("main._load_default_model"):
-        with TestClient(app) as c:
-            yield c
+    # No model auto-loads on startup any more (per-Feature upload); each test
+    # installs the model state it needs via `_install_model` or `loaded_model`.
+    with TestClient(app) as c:
+        yield c
     app.dependency_overrides.clear()
     # Reset model session after each test
     _engine._current_session = None
     _features.reset()
+
+
+def _install_model(feature, session, config=None):
+    """Put a model into the per-Feature store and make its Feature active.
+
+    Mirrors what an upload does, without needing a real .onnx: tests build a
+    mock ModelSession + ModelConfig and install it directly.
+    """
+    from inference.model_config import ModelConfig
+
+    _features._models[feature] = (session, config or ModelConfig())
+    _features._active_feature = feature
 
 
 @pytest.fixture
@@ -232,16 +243,8 @@ def presence_active(client):
         input_size=(20, 20),
         rule_params={"expected_classes": {"expected_classes": [0]}},
     )
-
-    def fake_activate(feature):
-        _engine._current_session = sess
-        _features._active_feature = feature
-        _features._model_config = cfg
-        return sess
-
-    with patch("main.features.activate", side_effect=fake_activate):
-        resp = client.post("/api/feature", data={"feature": "presence_absence"})
-    assert resp.status_code == 200
+    _install_model("presence_absence", sess, cfg)
+    assert client.post("/api/feature", data={"feature": "presence_absence"}).status_code == 200
     return sess
 
 
@@ -295,15 +298,7 @@ def test_presence_infer_nok_when_gasket_absent(client):
         input_size=(20, 20),
         rule_params={"expected_classes": {"expected_classes": [0]}},
     )
-
-    def fake_activate(feature):
-        _engine._current_session = sess
-        _features._active_feature = feature
-        _features._model_config = cfg
-        return sess
-
-    with patch("main.features.activate", side_effect=fake_activate):
-        client.post("/api/feature", data={"feature": "presence_absence"})
+    _install_model("presence_absence", sess, cfg)
 
     resp = client.post(
         "/api/infer",
@@ -327,9 +322,10 @@ def test_presence_stats_scoped_to_feature(client, presence_active):
     assert client.get("/api/stats?feature=anomaly_detection").json()["total"] == 0
 
 
-def test_decision_rules_empty_without_active_feature(client):
+def test_decision_rules_empty_without_a_loaded_model(client):
+    # A default Feature is selected on startup, but no model is loaded, so no
+    # rules can be offered until one is uploaded.
     body = client.get("/api/decision-rules").json()
-    assert body["active_feature"] is None
     assert body["rules"] == []
 
 
@@ -450,15 +446,7 @@ def segmentation_active(client):
         input_shape=(16, 16), model_version="seg-test",
     )
     cfg = ModelConfig(input_size=(16, 16), labels={0: "cap", 1: "logo"})
-
-    def fake_activate(feature):
-        _engine._current_session = sess
-        _features._active_feature = feature
-        _features._model_config = cfg
-        return sess
-
-    with patch("main.features.activate", side_effect=fake_activate):
-        client.post("/api/feature", data={"feature": "segmentation"})
+    _install_model("segmentation", sess, cfg)
     return client
 
 
@@ -632,7 +620,7 @@ def test_decision_rules_expose_sidecar_merged_defaults(client, segmentation_acti
     assert conc["defaults"]["target_center_method"] == schema_default
 
     # And a sidecar value must win over the schema default.
-    _features._model_config.rule_params = {
+    _features._models["segmentation"][1].rule_params = {
         "concentricity": {"target_center_method": "outer_circle_fit"}
     }
     rules = client.get("/api/decision-rules").json()["rules"]
@@ -747,15 +735,8 @@ class _StubCascade:
 
 @pytest.fixture
 def cascade_active(client):
-    """Put the app in cascade mode with build_cascade_pipeline stubbed."""
-    from main import features as _feat
-
-    def fake_activate(feature):
-        _feat._active_feature = feature
-        return None
-
-    with patch("main.features.activate", side_effect=fake_activate):
-        client.post("/api/feature", data={"feature": "cascade"})
+    """Put the app in cascade mode (activation loads no model)."""
+    assert client.post("/api/feature", data={"feature": "cascade"}).status_code == 200
     return client
 
 

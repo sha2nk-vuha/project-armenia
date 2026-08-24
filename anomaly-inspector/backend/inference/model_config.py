@@ -73,7 +73,15 @@ def load_config(path: str) -> ModelConfig:
         logger.info("No model sidecar at %s; using defaults (raw class indices).", path)
         return ModelConfig()
 
-    data = json.loads(p.read_text())
+    return config_from_dict(json.loads(p.read_text()))
+
+
+def config_from_dict(data: dict) -> ModelConfig:
+    """Build a ModelConfig from an already-parsed sidecar dict.
+
+    Shared by `load_config` (bundled sidecar files) and model upload (a sidecar
+    sent alongside the .onnx), so both honour the same defaults and back-compat.
+    """
     defaults = ModelConfig()
     labels = {int(k): str(v) for k, v in data.get("labels", {}).items()}
     input_size = data.get("input_size")

@@ -1,12 +1,14 @@
-"""Active-Feature registry: which inspection Feature is live, and its pipeline.
+"""Active-Feature registry and the per-Feature model store.
 
-A thin coordinator over `engine` (which owns the single loaded model session).
-It records the active Feature, loads the RF-DETR sidecar when Presence/Absence
-is active, and builds the matching pipeline on demand. `/api/infer` asks for
-`current_pipeline()` and stays agnostic to which Feature is running.
+Models are never auto-loaded: the operator uploads one model per Feature, and it
+is held here as a live session keyed by Feature (see docs/adr/0007). Both
+single-Feature mode and Cascade mode read from this one store, so a model
+uploaded for Segmentation serves a single-Feature Segmentation inspection and a
+Segmentation stage inside a cascade alike. A Feature used by two cascade stages
+(e.g. two rules over one segmentation model) shares that one model.
 
-Exactly one Feature is active at a time; switching reloads that Feature's
-default model (see docs/adr/0001).
+`/api/infer` asks for `current_pipeline()` (single) or `build_cascade_pipeline`
+(cascade) and stays agnostic to which Feature is running.
 """
 import logging
 from pathlib import Path
@@ -19,14 +21,19 @@ from config import (
     SEGMENTATION_FEATURE,
 )
 from inference import combine, decision, engine
-from inference.engine import ModelSession
 from inference.cascade import CascadePipeline, CascadeStage
+from inference.engine import ModelSession
+from inference.model_config import (
+    ModelConfig,
+    config_from_dict,
+    load_config,
+    sidecar_path,
+)
 from inference.pipeline import (
     AnomalyPipeline,
     PresenceAbsencePipeline,
     SegmentationPipeline,
 )
-from inference.model_config import ModelConfig, load_config, sidecar_path
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +41,10 @@ logger = logging.getLogger(__name__)
 # param defaults). Anomaly Detection needs none.
 _SIDECAR_FEATURES = (PRESENCE_FEATURE, SEGMENTATION_FEATURE)
 
+# The single source of truth: one uploaded (session, config) per Feature. No
+# default models are ever placed here.
+_models: dict[str, tuple[ModelSession, ModelConfig]] = {}
 _active_feature: str | None = None
-_model_config: ModelConfig | None = None
 
 
 def get_active_feature() -> str | None:
@@ -43,60 +52,102 @@ def get_active_feature() -> str | None:
 
 
 def get_model_config() -> ModelConfig | None:
-    return _model_config
+    """Config of the active single-Feature model, or None if none is loaded."""
+    if _active_feature and _active_feature != CASCADE_FEATURE:
+        entry = _models.get(_active_feature)
+        if entry:
+            return entry[1]
+    return None
 
 
-def activate(feature: str) -> ModelSession:
-    """Make `feature` active by loading its default model (swaps the session).
+def activate(feature: str) -> None:
+    """Make `feature` active. Does not load a model -- the operator uploads one.
 
-    For sidecar-backed Features, also loads the model's sidecar so the Class
-    Catalog, preprocessing, and rule param defaults are ready. Raises ValueError for an unknown
-    Feature and FileNotFoundError when the default model file is missing.
+    Raises ValueError for an unknown Feature. The Cascade Feature is valid; its
+    stage models load per request from the same store.
     """
-    global _active_feature, _model_config
-    if feature not in FEATURES:
-        raise ValueError(f"Unknown feature: {feature!r}")
-
-    if feature == CASCADE_FEATURE:
-        # A cascade has no single default model; members load per request.
-        _active_feature = feature
-        _model_config = None
-        return engine.get_session()
-
-    spec = FEATURES[feature]
-    model_path = Path(spec["model_path"])
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Default model for {feature!r} not found at {model_path}."
-        )
-
-    # Load the sidecar first so a malformed one fails before we swap the session
-    # or flip active state (no half-applied activation).
-    model_config = (
-        load_config(sidecar_path(str(model_path)))
-        if feature in _SIDECAR_FEATURES
-        else None
-    )
-    engine.load_model_from_path(str(model_path), spec["model_version"])
-    _active_feature = feature
-    _model_config = model_config
-    logger.info("Feature activated: %s (model=%s)", feature, model_path.name)
-    return engine.get_session()
-
-
-def register_upload(feature: str) -> None:
-    """Record that the currently-loaded (uploaded) session belongs to `feature`.
-
-    Used by /api/load-model after `engine` has loaded the uploaded bytes. Unlike
-    `activate`, it does not reload a default model. An uploaded model carries no
-    sidecar, so the existing Presence config (if any) is kept, else defaults.
-    """
-    global _active_feature, _model_config
+    global _active_feature
     if feature not in FEATURES:
         raise ValueError(f"Unknown feature: {feature!r}")
     _active_feature = feature
-    if feature in _SIDECAR_FEATURES and _model_config is None:
-        _model_config = ModelConfig()
+
+
+def _bundled_template(feature: str) -> ModelConfig:
+    """The bundled sidecar as a config template (Class Catalog, rule defaults).
+
+    A sidecar is configuration, not a model, so reading it does not load default
+    weights. It seeds class names and rule defaults so the builder is usable
+    before a model is uploaded; an uploaded model's own sidecar overrides it.
+    """
+    path = FEATURES[feature].get("model_path")
+    if path and Path(sidecar_path(str(path))).is_file():
+        return load_config(sidecar_path(str(path)))
+    return ModelConfig()
+
+
+def _config_for_upload(
+    feature: str, session: ModelSession, sidecar: dict | None
+) -> ModelConfig:
+    """Resolve an uploaded model's config: its own sidecar, else the template.
+
+    The preprocessing size always comes from the uploaded model itself, so a
+    model of a different input size than the template still preprocesses right.
+    """
+    if feature not in _SIDECAR_FEATURES:
+        return ModelConfig()
+    config = config_from_dict(sidecar) if sidecar is not None else _bundled_template(feature)
+    config.input_size = tuple(session.input_shape)
+    return config
+
+
+def upload_model(
+    feature: str,
+    model_bytes: bytes,
+    filename: str,
+    model_version: str,
+    sidecar: dict | None = None,
+) -> ModelSession:
+    """Load an uploaded model for `feature`, replacing any previous one.
+
+    Raises ValueError for an unknown or non-uploadable Feature (the Cascade
+    Feature has no model of its own), or when the bytes are not a valid .onnx.
+    """
+    if feature not in FEATURES or feature == CASCADE_FEATURE:
+        raise ValueError(f"Cannot upload a model for feature {feature!r}.")
+    session = engine.build_session(model_bytes, filename, model_version)
+    _models[feature] = (session, _config_for_upload(feature, session, sidecar))
+    logger.info("Model uploaded for %s: version=%s", feature, model_version)
+    return session
+
+
+def get_model(feature: str) -> tuple[ModelSession, ModelConfig] | None:
+    return _models.get(feature)
+
+
+def active_model() -> ModelSession | None:
+    """The active single-Feature model session, for status and reporting."""
+    if _active_feature and _active_feature != CASCADE_FEATURE:
+        entry = _models.get(_active_feature)
+        if entry:
+            return entry[0]
+    return None
+
+
+def loaded_models() -> dict[str, dict]:
+    """Which Features have a model loaded, for the per-stage/per-Feature indicator."""
+    return {
+        feature: {
+            "model_version": session.model_version,
+            "runtime": session.runtime,
+            "input_shape": list(session.input_shape),
+        }
+        for feature, (session, _) in _models.items()
+    }
+
+
+def clear_model(feature: str) -> bool:
+    """Unload a Feature's model. Returns True if one was present."""
+    return _models.pop(feature, None) is not None
 
 
 def _build_pipeline_for(feature: str, session: ModelSession, config: ModelConfig):
@@ -109,67 +160,31 @@ def _build_pipeline_for(feature: str, session: ModelSession, config: ModelConfig
 
 
 def current_pipeline():
-    """Build the pipeline for the active Feature over the loaded session.
+    """Build the pipeline for the active Feature over its uploaded model.
 
-    Returns None when no Feature is active or no model is loaded. The Cascade
-    Feature is not built here: it has no single model and is assembled per
-    request from its spec by `build_cascade_pipeline`.
+    Returns None when no Feature is active, the active Feature has no model
+    uploaded, or the Cascade Feature is active (it is assembled per request from
+    its spec by `build_cascade_pipeline`).
     """
-    sess = engine.get_session()
-    if sess is None or _active_feature is None or _active_feature == CASCADE_FEATURE:
+    if _active_feature is None or _active_feature == CASCADE_FEATURE:
         return None
-    return _build_pipeline_for(_active_feature, sess, _model_config or ModelConfig())
+    entry = _models.get(_active_feature)
+    if entry is None:
+        return None
+    return _build_pipeline_for(_active_feature, entry[0], entry[1])
 
 
-# ── Cascade: multi-model residency + assembly ───────────────────────────────
-# ADR 0001 keeps one model resident for single-Feature mode; a Cascade needs its
-# members together. They live in a store keyed by model path, reconciled to the
-# active spec so memory stays bounded to the current cascade (see docs/adr/0006).
-_cascade_sessions: dict[str, ModelSession] = {}
-_cascade_configs: dict[str, ModelConfig] = {}
-
-
-def _model_path_for(feature: str) -> str:
-    spec = FEATURES[feature]
-    path = Path(spec["model_path"])
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Model for stage feature {feature!r} not found at {path}."
-        )
-    return str(path)
-
-
-def _ensure_cascade_member(feature: str) -> tuple[ModelSession, ModelConfig]:
-    """Return a resident (session, config) for a stage's model, loading if new."""
-    path = _model_path_for(feature)
-    if path not in _cascade_sessions:
-        version = FEATURES[feature]["model_version"]
-        _cascade_sessions[path] = engine.build_session_from_path(path, version)
-        _cascade_configs[path] = (
-            load_config(sidecar_path(path))
-            if feature in _SIDECAR_FEATURES
-            else ModelConfig()
-        )
-        logger.info("Cascade member loaded: %s (%s)", feature, path)
-    return _cascade_sessions[path], _cascade_configs[path]
-
-
-def _retain_cascade_members(paths: set[str]) -> None:
-    """Evict resident member sessions no active spec references."""
-    for path in list(_cascade_sessions):
-        if path not in paths:
-            _cascade_sessions.pop(path, None)
-            _cascade_configs.pop(path, None)
-            logger.info("Cascade member evicted: %s", path)
+# ── Cascade assembly ────────────────────────────────────────────────────────
+# A cascade reads the same per-Feature store: each stage's model is the model
+# uploaded for that stage's Feature. Stages sharing a Feature share its model.
 
 
 def build_cascade_pipeline(spec: dict) -> CascadePipeline:
     """Assemble a CascadePipeline from a per-request spec.
 
-    Reconciles residency to the models the spec names. Raises ValueError for a
-    malformed spec, an unknown feature/rule, or a rule incompatible with a
-    stage's Feature; FileNotFoundError when a stage's model file is missing.
-    These are configuration errors the API surfaces rather than silent NOKs.
+    Raises ValueError for a malformed spec, an unknown feature/rule, a rule
+    incompatible with a stage's Feature, or a stage whose Feature has no model
+    uploaded -- configuration errors the API surfaces rather than silent NOKs.
     """
     combinator = combine.get(spec.get("combinator", "and"))
     short_circuit = bool(spec.get("short_circuit", True))
@@ -177,14 +192,17 @@ def build_cascade_pipeline(spec: dict) -> CascadePipeline:
     if not isinstance(raw_stages, list) or not raw_stages:
         raise ValueError("A cascade needs a non-empty 'stages' list.")
 
-    referenced: set[str] = set()
     stages: list[CascadeStage] = []
     for i, raw in enumerate(raw_stages):
         feature = raw.get("feature")
         if feature not in FEATURES or feature == CASCADE_FEATURE:
             raise ValueError(f"Stage {i + 1}: invalid feature {feature!r}.")
-        session, config = _ensure_cascade_member(feature)
-        referenced.add(_model_path_for(feature))
+        entry = _models.get(feature)
+        if entry is None:
+            raise ValueError(
+                f"Stage {i + 1}: no model loaded for {feature!r}; upload one first."
+            )
+        session, config = entry
         pipeline = _build_pipeline_for(feature, session, config)
 
         rule_name = raw.get("rule") or pipeline.default_rule
@@ -206,29 +224,34 @@ def build_cascade_pipeline(spec: dict) -> CascadePipeline:
             )
         )
 
-    _retain_cascade_members(referenced)
     return CascadePipeline(stages, combinator, short_circuit)
 
 
-def cascade_options() -> dict:
-    """Everything the stage builder needs, without loading any ONNX model.
+# Output kinds each Feature's decode advertises -- static, so the builder needs
+# no model load to know which rules a Feature can run.
+_FEATURE_KINDS = {
+    ANOMALY: frozenset({decision.KIND_ANOMALY_MAP}),
+    PRESENCE_FEATURE: frozenset({decision.KIND_DETECTIONS}),
+    SEGMENTATION_FEATURE: frozenset({decision.KIND_DETECTIONS, decision.KIND_MASKS}),
+}
 
-    Rules are typed on output kinds, which are static per Feature, and Class
-    Catalogs come from the sidecar JSON -- so the builder is populated without
-    paying a model load for every candidate stage.
+
+def cascade_options() -> dict:
+    """Everything the stage builder needs, plus which Features have a model.
+
+    Rules are typed on output kinds (static per Feature). Class Catalogs and
+    rule defaults come from the uploaded model's config when one is loaded, else
+    the bundled sidecar template -- so the builder is usable before upload and
+    reflects the real model afterwards.
     """
     features_out = []
     for name in FEATURES:
         if name == CASCADE_FEATURE:
             continue
-        kinds = _FEATURE_KINDS.get(name, frozenset())
-        cfg = (
-            load_config(sidecar_path(str(FEATURES[name]["model_path"])))
-            if name in _SIDECAR_FEATURES
-            else ModelConfig()
-        )
+        entry = _models.get(name)
+        cfg = entry[1] if entry else _bundled_template(name)
         rules = []
-        for rule in decision.compatible_with(kinds):
+        for rule in decision.compatible_with(_FEATURE_KINDS.get(name, frozenset())):
             described = decision.describe(rule)
             described["defaults"] = decision.resolve_params(
                 rule, _sidecar_rule_defaults(name, rule.name, cfg)
@@ -242,6 +265,7 @@ def cascade_options() -> dict:
                 "labels": {str(k): v for k, v in cfg.labels.items()},
                 "default_rule": cfg.default_rule,
                 "rules": rules,
+                "model": loaded_models().get(name),  # None until a model is uploaded
             }
         )
     return {
@@ -257,21 +281,12 @@ def _sidecar_rule_defaults(feature: str, rule_name: str, cfg: ModelConfig) -> di
     return cfg.rule_params.get(rule_name, {})
 
 
-# Output kinds each Feature's decode advertises -- static, so the builder needs
-# no model load to know which rules a Feature can run.
-_FEATURE_KINDS = {
-    ANOMALY: frozenset({decision.KIND_ANOMALY_MAP}),
-    PRESENCE_FEATURE: frozenset({decision.KIND_DETECTIONS}),
-    SEGMENTATION_FEATURE: frozenset({decision.KIND_DETECTIONS, decision.KIND_MASKS}),
-}
-
-
 def current_decision_rules() -> list[dict]:
     """UI metadata for the Decision Rules the active pipeline can run.
 
     Filtered by the output kinds the active Feature's decode advertises, so the
     GUI never offers a rule that cannot consume this model's output. Empty when
-    no Feature is active.
+    no Feature is active or no model is loaded for it.
     """
     pipeline = current_pipeline()
     if pipeline is None:
@@ -291,9 +306,7 @@ def current_decision_rules() -> list[dict]:
 
 
 def reset() -> None:
-    """Clear active-Feature state (test hook; does not unload the engine session)."""
-    _cascade_sessions.clear()
-    _cascade_configs.clear()
-    global _active_feature, _model_config
+    """Clear all loaded models and active-Feature state (test hook)."""
+    global _active_feature
+    _models.clear()
     _active_feature = None
-    _model_config = None
