@@ -1,7 +1,8 @@
 import { FolderUp } from "lucide-react";
 import { Label } from "./ui/label";
 import { ThresholdControl } from "./ThresholdControl";
-import type { FeatureInfo } from "../api/client";
+import { DecisionRuleControl } from "./DecisionRuleControl";
+import type { DecisionRuleInfo, FeatureInfo, RuleParams } from "../api/client";
 
 interface Props {
   skus: string[];
@@ -13,6 +14,12 @@ interface Props {
   activeFeature: string | null;
   featureSwitching: boolean;
   thresholdLabel: string;
+  decisionRules: DecisionRuleInfo[];
+  classLabels: Record<string, string>;
+  selectedRule: string | null;
+  ruleParams: RuleParams;
+  onRuleChange: (rule: string) => void;
+  onRuleParamChange: (name: string, value: unknown) => void;
   onFeatureChange: (feature: string) => void;
   onSkuChange: (sku: string) => void;
   onThresholdChange: (value: number) => void;
@@ -30,6 +37,12 @@ export function InferencePanel({
   activeFeature,
   featureSwitching,
   thresholdLabel,
+  decisionRules,
+  classLabels,
+  selectedRule,
+  ruleParams,
+  onRuleChange,
+  onRuleParamChange,
   onFeatureChange,
   onSkuChange,
   onThresholdChange,
@@ -107,6 +120,16 @@ export function InferencePanel({
       </div>
 
       <ThresholdControl value={threshold} onChange={onThresholdChange} label={thresholdLabel} />
+
+      <DecisionRuleControl
+        rules={decisionRules}
+        labels={classLabels}
+        selected={selectedRule}
+        params={ruleParams}
+        disabled={featureSwitching}
+        onSelect={onRuleChange}
+        onParamChange={onRuleParamChange}
+      />
 
       {!modelLoaded && (
         <p className="text-xs text-amber-600">

@@ -28,11 +28,22 @@ interface Props {
   segmentation: string | null;
   annotated: string | null;
   detections: Detection[] | null;
+  // What the Decision Rule measured, e.g. offset_ratio / offset_px.
+  metrics: Record<string, unknown> | null;
 }
 
 // Below this container width the panels stack vertically; at or above it they
 // sit side by side. ~600px gives each panel a usable size.
 const HORIZONTAL_BREAKPOINT = 600;
+
+/** Metrics are rule-defined, so render any JSON scalar or array generically. */
+function formatMetric(value: unknown): string {
+  if (Array.isArray(value)) return value.map((v) => formatMetric(v)).join(", ");
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(4);
+  }
+  return String(value);
+}
 
 export function ResultsDisplay({
   feature,
@@ -41,7 +52,12 @@ export function ResultsDisplay({
   segmentation,
   annotated,
   detections,
+  metrics,
 }: Props) {
+  const metricEntries = Object.entries(metrics ?? {}).filter(
+    ([, v]) => v !== null && v !== undefined && !(Array.isArray(v) && v.length === 0)
+  );
+
   const heatmapSrc = heatmap ? `data:image/jpeg;base64,${heatmap}` : null;
   const segSrc = segmentation ? `data:image/jpeg;base64,${segmentation}` : null;
   const annotatedSrc = annotated ? `data:image/jpeg;base64,${annotated}` : null;
@@ -60,7 +76,9 @@ export function ResultsDisplay({
     return () => ro.disconnect();
   }, []);
 
-  const isPresence = feature === "presence_absence";
+  // Detector-backed Features render one annotated image plus a detection list;
+  // Anomaly Detection renders its heatmap/segmentation pair.
+  const isDetectorFeature = feature === "presence_absence" || feature === "segmentation";
 
   return (
     <div className="flex flex-col gap-3 w-full">
@@ -69,7 +87,7 @@ export function ResultsDisplay({
         className={`flex gap-3 w-full ${horizontal ? "flex-row items-start" : "flex-col"}`}
       >
         <ImagePanel src={originalPreview} label="Original" />
-        {isPresence ? (
+        {isDetectorFeature ? (
           <ImagePanel src={annotatedSrc} label="Detections" />
         ) : (
           <>
@@ -79,7 +97,7 @@ export function ResultsDisplay({
         )}
       </div>
 
-      {isPresence && detections && (
+      {isDetectorFeature && detections && (
         <div className="rounded-xl border border-gray-200 overflow-hidden">
           <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">
             Detections ({detections.length})
@@ -98,6 +116,24 @@ export function ResultsDisplay({
               ))}
             </ul>
           )}
+        </div>
+      )}
+
+      {metricEntries.length > 0 && (
+        <div className="rounded-xl border border-gray-200 overflow-hidden">
+          <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+            Measurements
+          </div>
+          <ul className="divide-y divide-gray-100">
+            {metricEntries.map(([key, value]) => (
+              <li key={key} className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm">
+                <span className="text-gray-500">{key.replace(/_/g, " ")}</span>
+                <span className="font-mono text-xs text-gray-700 text-right break-all">
+                  {formatMetric(value)}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

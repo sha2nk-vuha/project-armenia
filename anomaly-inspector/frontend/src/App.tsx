@@ -6,6 +6,8 @@ import {
   type LoadModelResponse,
   type DatasetImage,
   type FeatureInfo,
+  type DecisionRuleInfo,
+  type RuleParams,
 } from "./api/client";
 import { SettingsModal } from "./components/SettingsModal";
 import { ReportModal } from "./components/ReportModal";
@@ -37,6 +39,13 @@ export default function App() {
   // one of these uploads the file rather than referencing a dataset path.
   const [uploadedFiles, setUploadedFiles] = useState<Record<string, File>>({});
 
+  // Decision Rule selection + params. They travel per-request like `threshold`,
+  // so the browser holds the live values and the backend stays stateless.
+  const [decisionRules, setDecisionRules] = useState<DecisionRuleInfo[]>([]);
+  const [classLabels, setClassLabels] = useState<Record<string, string>>({});
+  const [selectedRule, setSelectedRule] = useState<string | null>(null);
+  const [ruleParams, setRuleParams] = useState<RuleParams>({});
+
   const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -53,6 +62,7 @@ export default function App() {
   const [resultsWidth, setResultsWidth] = useState(DEFAULT_RESULTS_WIDTH);
 
   const modelLoaded = !!modelStatus;
+  const activeRule = decisionRules.find((r) => r.name === selectedRule) ?? null;
   const activeFeatureInfo = features.find((f) => f.name === activeFeature) ?? null;
   const thresholdLabel = activeFeatureInfo?.threshold_label ?? "Threshold";
   const resultFeature = inferResult?.feature ?? activeFeature ?? "anomaly_detection";
@@ -93,10 +103,35 @@ export default function App() {
     api.getSkus().then(setSkus).catch(() => {});
   }, []);
 
-  // Keep stats scoped to the current SKU and active Feature.
+  // The rules a Feature can run depend on what its decode produces, so refetch
+  // whenever the Feature changes and seed params from the schema defaults.
+  const loadDecisionRules = useCallback(async () => {
+    try {
+      const res = await api.getDecisionRules();
+      setDecisionRules(res.rules);
+      setClassLabels(res.labels ?? {});
+      const preferred =
+        res.rules.find((r) => r.name === res.default_rule) ?? res.rules[0] ?? null;
+      setSelectedRule(preferred?.name ?? null);
+      setRuleParams(
+        Object.fromEntries((preferred?.params ?? []).map((p) => [p.name, p.default]))
+      );
+    } catch {
+      setDecisionRules([]);
+      setSelectedRule(null);
+      setRuleParams({});
+    }
+  }, []);
+
   useEffect(() => {
-    api.getStats(selectedSku, activeFeature).then(setStats).catch(() => {});
-  }, [selectedSku, activeFeature]);
+    if (modelLoaded) void loadDecisionRules();
+  }, [modelLoaded, activeFeature, loadDecisionRules]);
+
+  // Keep stats scoped to the current SKU, Feature, and Decision Rule: an OK from
+  // one rule is not comparable to an OK from another.
+  useEffect(() => {
+    api.getStats(selectedSku, activeFeature, selectedRule).then(setStats).catch(() => {});
+  }, [selectedSku, activeFeature, selectedRule]);
 
   // When the SKU changes, load its images and clear any prior selection/results.
   useEffect(() => {
@@ -151,6 +186,22 @@ export default function App() {
     [activeFeature, featureSwitching]
   );
 
+  const handleRuleChange = useCallback(
+    (name: string) => {
+      const rule = decisionRules.find((r) => r.name === name);
+      setSelectedRule(name);
+      setRuleParams(
+        Object.fromEntries((rule?.params ?? []).map((p) => [p.name, p.default]))
+      );
+      setInferResult(null);
+    },
+    [decisionRules]
+  );
+
+  const handleRuleParamChange = useCallback((name: string, value: unknown) => {
+    setRuleParams((prev) => ({ ...prev, [name]: value }));
+  }, []);
+
   const handleResetDatabase = useCallback(async () => {
     const confirmed = window.confirm(
       "Erase all recorded inspections? This clears the data used for reports and cannot be undone."
@@ -159,7 +210,7 @@ export default function App() {
     setResetting(true);
     try {
       await api.resetDatabase();
-      setStats(await api.getStats(selectedSku, activeFeature));
+      setStats(await api.getStats(selectedSku, activeFeature, selectedRule));
       setInferResult(null);
       setSelectedPath(null);
       setOriginalSrc(null);
@@ -170,7 +221,7 @@ export default function App() {
     } finally {
       setResetting(false);
     }
-  }, [selectedSku, activeFeature]);
+  }, [selectedSku, activeFeature, selectedRule]);
 
   async function runInferByPath(path: string) {
     if (!modelLoaded || !selectedSku || inferringKey) return;
@@ -182,11 +233,11 @@ export default function App() {
     setInferringKey(path);
     try {
       const result = uploaded
-        ? await api.infer(uploaded, selectedSku, threshold, customerName)
-        : await api.inferByPath(path, selectedSku, threshold, customerName);
+        ? await api.infer(uploaded, selectedSku, threshold, customerName, selectedRule, ruleParams)
+        : await api.inferByPath(path, selectedSku, threshold, customerName, selectedRule, ruleParams);
       setInferResult(result);
       setVerdicts((v) => ({ ...v, [path]: result.verdict }));
-      setStats(await api.getStats(selectedSku, activeFeature));
+      setStats(await api.getStats(selectedSku, activeFeature, selectedRule));
     } catch (e) {
       setInferError(e instanceof Error ? e.message : "Inference failed.");
     } finally {
@@ -285,6 +336,12 @@ export default function App() {
             activeFeature={activeFeature}
             featureSwitching={featureSwitching}
             thresholdLabel={thresholdLabel}
+            decisionRules={decisionRules}
+            classLabels={classLabels}
+            selectedRule={selectedRule}
+            ruleParams={ruleParams}
+            onRuleChange={handleRuleChange}
+            onRuleParamChange={handleRuleParamChange}
             onFeatureChange={handleFeatureChange}
             onSkuChange={setSelectedSku}
             onThresholdChange={setThreshold}
@@ -340,8 +397,9 @@ export default function App() {
 
           <VerdictBadge
             verdict={inferResult?.verdict ?? null}
-            score={inferResult?.anomaly_score ?? null}
-            scoreLabel="Anomaly Score"
+            score={inferResult?.score ?? null}
+            scoreLabel={inferResult?.score_label || activeRule?.label || "Score"}
+            reason={inferResult?.reason}
           />
 
           {inferError && (
@@ -355,8 +413,9 @@ export default function App() {
             originalPreview={originalSrc}
             heatmap={inferResult?.heatmap_image ?? null}
             segmentation={inferResult?.segmentation_image ?? null}
-            annotated={inferResult?.annotated_image ?? null}
+            annotated={inferResult?.annotated_image ?? inferResult?.overlay_image ?? null}
             detections={inferResult?.detections ?? null}
+            metrics={inferResult?.metrics ?? null}
           />
         </section>
       </main>

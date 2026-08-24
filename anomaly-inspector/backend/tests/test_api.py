@@ -115,7 +115,7 @@ def test_infer_success(client, loaded_model):
     assert resp.status_code == 200
     body = resp.json()
     assert body["verdict"] == "not_ok"
-    assert 0.0 <= body["anomaly_score"] <= 1.0
+    assert 0.0 <= body["score"] <= 1.0
     assert body["heatmap_image"].startswith("/9j/")
     assert body["segmentation_image"].startswith("/9j/")
 
@@ -276,7 +276,7 @@ def test_presence_infer_returns_feature_shaped_payload(client, presence_active):
     assert body["annotated_image"].startswith("/9j/")
     assert body["detections"] and body["detections"][0]["label"] == "gasket"
     # No anomaly-specific fields for this Feature.
-    assert body["anomaly_score"] is None
+    assert body["score"] is None
 
 
 def test_presence_infer_nok_when_gasket_absent(client):
@@ -352,7 +352,7 @@ def test_infer_reports_which_rule_decided_and_why(client, loaded_model):
     assert "anomaly score" in body["reason"]
     assert body["metrics"]["threshold"] == 0.5
     # Deprecated alias kept until the GUI moves to `score`.
-    assert body["anomaly_score"] == body["score"]
+    assert body["score"] is not None
 
 
 def test_infer_rejects_malformed_rule_params(client, loaded_model):

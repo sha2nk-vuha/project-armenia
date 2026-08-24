@@ -12,15 +12,52 @@ export interface Detection {
   box: number[];
 }
 
+// One user-tunable Decision Rule parameter. The GUI renders controls from this
+// schema, so a new rule needs no frontend code.
+export interface ParamSpec {
+  name: string;
+  label: string;
+  type: "number" | "enum" | "class" | "class_list" | "bool";
+  default: unknown;
+  min: number | null;
+  max: number | null;
+  step: number | null;
+  options: string[] | null;
+  help: string | null;
+}
+
+export interface DecisionRuleInfo {
+  name: string;
+  label: string;
+  consumes: string[];
+  params: ParamSpec[];
+}
+
+export interface DecisionRulesResponse {
+  active_feature: string | null;
+  // Class Catalog of the loaded model, keyed by class id as a string.
+  labels: Record<string, string>;
+  default_rule: string | null;
+  rules: DecisionRuleInfo[];
+}
+
+export type RuleParams = Record<string, unknown>;
+
 export interface InferResponse {
   feature: string;
+  // Which Decision Rule produced the Verdict.
+  decision_rule: string;
   verdict: "ok" | "not_ok";
-  // Anomaly Detection only; null for Features without a single score.
-  anomaly_score: number | null;
+  // The rule's primary scalar; null for rules without one. `score_label` names it.
+  score: number | null;
+  score_label: string;
+  metrics: Record<string, unknown>;
+  reason: string;
   heatmap_image: string | null;
   segmentation_image: string | null;
-  // Presence/Absence only.
+  // Detector-backed Features (Presence/Absence, Segmentation).
   annotated_image: string | null;
+  overlay_image: string | null;
   detections: Detection[] | null;
 }
 
@@ -55,6 +92,26 @@ export interface DatasetImage {
   url?: string;
 }
 
+// Rule selection and params travel per-request, exactly like `threshold`, so
+// the backend holds no tuning state.
+function inferForm(
+  skuName: string,
+  threshold: number,
+  customerName: string,
+  decisionRule?: string | null,
+  ruleParams?: RuleParams | null
+): FormData {
+  const form = new FormData();
+  form.append("sku_name", skuName);
+  form.append("threshold", String(threshold));
+  form.append("customer_name", customerName);
+  if (decisionRule) form.append("decision_rule", decisionRule);
+  if (ruleParams && Object.keys(ruleParams).length > 0) {
+    form.append("rule_params", JSON.stringify(ruleParams));
+  }
+  return form;
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
@@ -72,24 +129,37 @@ export const api = {
     return handleResponse<LoadModelResponse>(res);
   },
 
-  async infer(image: File, skuName: string, threshold: number, customerName: string): Promise<InferResponse> {
-    const form = new FormData();
+  async infer(
+    image: File,
+    skuName: string,
+    threshold: number,
+    customerName: string,
+    decisionRule?: string | null,
+    ruleParams?: RuleParams | null
+  ): Promise<InferResponse> {
+    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams);
     form.append("image", image);
-    form.append("sku_name", skuName);
-    form.append("threshold", String(threshold));
-    form.append("customer_name", customerName);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
   },
 
-  async inferByPath(imagePath: string, skuName: string, threshold: number, customerName: string): Promise<InferResponse> {
-    const form = new FormData();
+  async inferByPath(
+    imagePath: string,
+    skuName: string,
+    threshold: number,
+    customerName: string,
+    decisionRule?: string | null,
+    ruleParams?: RuleParams | null
+  ): Promise<InferResponse> {
+    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams);
     form.append("image_path", imagePath);
-    form.append("sku_name", skuName);
-    form.append("threshold", String(threshold));
-    form.append("customer_name", customerName);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
+  },
+
+  async getDecisionRules(): Promise<DecisionRulesResponse> {
+    const res = await fetch("/api/decision-rules");
+    return handleResponse<DecisionRulesResponse>(res);
   },
 
   async getSkus(): Promise<string[]> {
@@ -108,10 +178,15 @@ export const api = {
     return `/api/images?path=${encodeURIComponent(path)}`;
   },
 
-  async getStats(skuName?: string | null, feature?: string | null): Promise<StatsResponse> {
+  async getStats(
+    skuName?: string | null,
+    feature?: string | null,
+    decisionRule?: string | null
+  ): Promise<StatsResponse> {
     const params = new URLSearchParams();
     if (skuName) params.set("sku_name", skuName);
     if (feature) params.set("feature", feature);
+    if (decisionRule) params.set("decision_rule", decisionRule);
     const qs = params.toString();
     const res = await fetch(qs ? `/api/stats?${qs}` : "/api/stats");
     return handleResponse<StatsResponse>(res);

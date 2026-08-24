@@ -34,4 +34,8 @@ from inference.decision.registry import (  # noqa: F401
 )
 
 # Built-in rules — imported for their registration side effect.
-from inference.decision import anomaly_threshold, expected_classes  # noqa: F401,E402
+from inference.decision import (  # noqa: F401,E402
+    anomaly_threshold,
+    concentricity,
+    expected_classes,
+)

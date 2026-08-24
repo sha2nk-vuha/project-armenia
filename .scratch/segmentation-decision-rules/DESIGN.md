@@ -1,8 +1,8 @@
 # Design: Decision Rules + Segmentation Feature
 
-Status: ready-for-agent
-Settled via a `/grill-me` session. 18 questions, all resolved. Two inputs still
-needed from the user (see "Open inputs").
+Status: implemented
+Settled via a `/grill-me` session (18 questions), then delivered in three
+commits. Both open inputs are resolved -- see "Resolved inputs".
 
 ## Problem
 
@@ -230,15 +230,43 @@ stops hardcoding "Anomaly Score" and uses the rule's `score_label`.
 - **Real-model contract**: assert the segmentation ONNX's I/O signature so a
   model swap fails loudly rather than silently mis-decoding.
 
-## Open inputs
+## Resolved inputs
 
-1. **Class map for the 3 classes.** `labels` has width 3; the two named classes
-   are `bottle_cap` and `logo`. The detection sidecar's third slot was
-   `background`, so the same is likely -- but guessing class ids is precisely how
-   a NOK rule silently inverts. Needed before the sidecar is written.
-2. **Sample cap images** under `data/three_cee_caps/test/`. Any directory
-   containing a `test/` subfolder becomes a browsable SKU automatically. Needed
-   to verify the stride-4 full-frame mask assumption and to confirm the class map
-   empirically.
+1. **Class map — corrected from the working assumption.** Running the model over
+   the sample images shows **class 0 = bottle_cap, class 1 = logo**; class 2
+   never fires. The assumed `0=background, 1=bottle_cap, 2=logo` would have
+   pointed the rule at class 2 for the logo, so every part would have failed with
+   "logo not detected". Confirmed both numerically (class 0 is the larger filled
+   blob, never touching the image border; class 1 is contained within it) and
+   visually against all three samples.
 
-Neither blocks commit 1.
+2. **Mask geometry — verified, not assumed.** Each query's binarised mask bbox
+   agrees with its own predicted box to within ~0.005 normalised across every
+   query and image. ROI-cropped masks would instead give a mask bbox of
+   ~(0,0,1,1) every time. Stride-4 full-frame confirmed; a contract test now
+   asserts the 4x relationship so a model swap fails loudly.
+
+## Outcome on the sample images
+
+With the default 0.10 tolerance, the rule separates the samples cleanly:
+
+| Image | Offset ratio | Verdict |
+|---|---|---|
+| `1a791f7d-radico_purple_anomaly_119.png` | 0.300 | NOK |
+| `3a08ab93-radico_blue_image_116.png` | 0.054 | OK |
+| `3adf5c74-image_095.png` | 0.027 | OK |
+
+The one file named "anomaly" is the one that fails, and the margin between the
+NOK (0.300) and the worst OK (0.054) is wide enough that the tolerance is not
+balanced on a knife edge.
+
+## Known follow-ups
+
+- **`DATA_ROOT` points at `data/MVTecAD`,** so `data/three_cee_caps` is not
+  browsable in the UI without `DATA_ROOT=<repo>/data`. That setting in turn hides
+  the MVTec SKUs, because `MVTecAD` has no `test/` directory of its own. One root
+  cannot serve both dataset layouts; either move the cap folder under
+  `data/MVTecAD/`, or teach SKU discovery about nested collections.
+- **`/model/` is gitignored,** so neither sidecar is version-controlled. A fresh
+  clone gets no sidecar, and the segmentation model would then preprocess at the
+  384 default instead of its actual 312 — silently wrong rather than broken.

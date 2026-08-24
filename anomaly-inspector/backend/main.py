@@ -197,8 +197,15 @@ def list_decision_rules():
     The GUI renders controls generically from `params`, so a new rule needs no
     frontend code. Empty list when no Feature is active.
     """
+    config = features.get_model_config()
+    pipeline = features.current_pipeline()
     return {
         "active_feature": features.get_active_feature(),
+        # The Class Catalog, so `class` params render as real dropdowns rather
+        # than free-text class ids the operator has to guess.
+        "labels": {str(k): v for k, v in (config.labels if config else {}).items()},
+        "default_rule": (config.default_rule if config else None)
+        or (pipeline.default_rule if pipeline else None),
         "rules": features.current_decision_rules(),
     }
 
@@ -287,9 +294,6 @@ async def infer(
         "score_label": result.score_label,
         "metrics": result.metrics,
         "reason": result.reason,
-        # Deprecated alias, kept so the current frontend keeps working until the
-        # GUI moves to `score`/`score_label`. Remove with that change.
-        "anomaly_score": rounded_score,
         "heatmap_image": _b64(heatmap_bytes),
         "segmentation_image": _b64(segmentation_bytes),
         "annotated_image": _b64(annotated_bytes),
