@@ -199,9 +199,12 @@ export const api = {
   async calibrate(
     skuName: string,
     decisionRule: string,
-    imagePaths: string[],
     threshold: number,
-    ruleParams: RuleParams
+    ruleParams: RuleParams,
+    // Dataset samples by path, and browser-uploaded samples as files. A folder
+    // browsed in the GUI lives only in the browser, so its files must be sent.
+    imagePaths: string[],
+    imageFiles: File[]
   ): Promise<CalibrateResult> {
     const form = new FormData();
     form.append("sku_name", skuName);
@@ -209,6 +212,7 @@ export const api = {
     form.append("image_paths", JSON.stringify(imagePaths));
     form.append("threshold", String(threshold));
     form.append("rule_params", JSON.stringify(ruleParams));
+    for (const file of imageFiles) form.append("images", file);
     const res = await fetch("/api/calibrate", { method: "POST", body: form });
     return handleResponse<CalibrateResult>(res);
   },

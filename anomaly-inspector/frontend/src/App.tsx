@@ -169,19 +169,30 @@ export default function App() {
 
   const handleCalibrate = useCallback(async () => {
     if (!selectedSku || !selectedRule || !calibrationGroup) return;
-    const paths = images.filter((i) => i.category === calibrationGroup).map((i) => i.path);
-    if (paths.length === 0) return;
+    const group = images.filter((i) => i.category === calibrationGroup);
+    // Uploaded images live in the browser (synthetic __upload__ paths the
+    // backend cannot read from disk), so send them as files; dataset images go
+    // by path. Same split the gallery already uses to run inference.
+    const datasetPaths: string[] = [];
+    const uploadFiles: File[] = [];
+    for (const img of group) {
+      const file = uploadedFiles[img.path];
+      if (file) uploadFiles.push(file);
+      else datasetPaths.push(img.path);
+    }
+    const total = datasetPaths.length + uploadFiles.length;
+    if (total === 0) return;
     setCalibrating(true);
     setInferError(null);
     try {
       const result = await api.calibrate(
-        selectedSku, selectedRule, paths, threshold, ruleParams
+        selectedSku, selectedRule, threshold, ruleParams, datasetPaths, uploadFiles
       );
       setCalibration({ ...result, calibrated: true });
       setRuleParams((prev) => ({ ...prev, ...result.params }));
       if (result.skipped.length > 0) {
         setInferError(
-          `Calibrated on ${result.sample_count} of ${paths.length} images; ` +
+          `Calibrated on ${result.sample_count} of ${total} images; ` +
             `${result.skipped.length} could not be measured.`
         );
       }
@@ -190,7 +201,7 @@ export default function App() {
     } finally {
       setCalibrating(false);
     }
-  }, [selectedSku, selectedRule, calibrationGroup, images, threshold, ruleParams]);
+  }, [selectedSku, selectedRule, calibrationGroup, images, uploadedFiles, threshold, ruleParams]);
 
   const handleClearCalibration = useCallback(async () => {
     if (!selectedSku || !selectedRule) return;

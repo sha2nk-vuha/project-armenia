@@ -257,8 +257,9 @@ def clear_sku_calibration(
 @app.post("/api/calibrate")
 async def calibrate(
     sku_name: str = Form(...),
-    image_paths: str = Form(...),
     threshold: float = Form(...),
+    image_paths: str = Form("[]"),
+    images: list[UploadFile] = File(default=[]),
     decision_rule: str = Form(""),
     rule_params: str = Form(""),
     db: Session = Depends(get_db),
@@ -285,8 +286,20 @@ async def calibrate(
         paths = json.loads(image_paths)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="image_paths must be valid JSON.")
-    if not isinstance(paths, list) or not paths:
-        raise HTTPException(status_code=400, detail="Provide a non-empty list of image_paths.")
+    if not isinstance(paths, list):
+        raise HTTPException(status_code=400, detail="image_paths must be a JSON list.")
+
+    # Samples arrive either as dataset paths or as uploaded files (a folder
+    # browsed in the GUI lives in the browser, not on disk). Read both into a
+    # (label, bytes) list so the measurement loop treats them uniformly.
+    samples: list[tuple[str, bytes]] = [
+        (rel, _resolve_data_path(rel).read_bytes()) for rel in paths
+    ]
+    for upload in images:
+        samples.append((upload.filename or "uploaded", await upload.read()))
+
+    if not samples:
+        raise HTTPException(status_code=400, detail="Provide at least one calibration image.")
 
     try:
         overrides = json.loads(rule_params) if rule_params else None
@@ -295,14 +308,13 @@ async def calibrate(
 
     measured: list[float] = []
     skipped: list[str] = []
-    for rel in paths:
-        image_bytes = _resolve_data_path(rel).read_bytes()
+    for label, image_bytes in samples:
         try:
             result = pipeline.infer(image_bytes, threshold, rule.name, overrides)
         except ClassNotFound as e:
             raise HTTPException(status_code=422, detail=str(e))
         except (ValueError, IndexError):
-            skipped.append(rel)
+            skipped.append(label)
             continue
         value = result.metrics.get(spec.metric)
         # A sample the rule could not measure (a part it failed to find) carries
@@ -310,13 +322,13 @@ async def calibrate(
         if isinstance(value, (int, float)):
             measured.append(float(value))
         else:
-            skipped.append(rel)
+            skipped.append(label)
 
     if not measured:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"None of the {len(paths)} images produced a {spec.metric!r} "
+                f"None of the {len(samples)} images produced a {spec.metric!r} "
                 "measurement; check that the expected parts are detected."
             ),
         )

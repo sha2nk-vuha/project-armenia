@@ -638,3 +638,62 @@ def test_decision_rules_expose_sidecar_merged_defaults(client, segmentation_acti
     rules = client.get("/api/decision-rules").json()["rules"]
     conc = next(r for r in rules if r["name"] == "concentricity")
     assert conc["defaults"]["target_center_method"] == "outer_circle_fit"
+
+
+def test_calibrate_accepts_uploaded_files_not_only_dataset_paths(
+    client, segmentation_active
+):
+    """A folder browsed in the GUI lives only in the browser, so its images are
+    sent as file uploads with no dataset path. Calibration must teach from those
+    -- the path-only version failed here with 'Image not found'."""
+    png = _make_png_bytes()
+    resp = client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-UP", "threshold": "0.5",
+            "decision_rule": "concentricity",
+            "rule_params": __import__("json").dumps(_calibration_params()),
+        },
+        files=[
+            ("images", ("a.png", png, "image/png")),
+            ("images", ("b.png", png, "image/png")),
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sample_count"] == 2
+    assert "nominal_offset" in body["params"]
+    assert client.get(
+        "/api/skus/SKU-UP/calibration?decision_rule=concentricity"
+    ).json()["calibrated"]
+
+
+def test_calibrate_mixes_dataset_paths_and_uploads(client, segmentation_active):
+    import json as _json
+
+    png = _make_png_bytes()
+    with patch("main._resolve_data_path") as resolve:
+        resolve.return_value.read_bytes.return_value = png
+        resp = client.post(
+            "/api/calibrate",
+            data={
+                "sku_name": "SKU-MIX", "threshold": "0.5",
+                "decision_rule": "concentricity",
+                "image_paths": _json.dumps(["dataset/one.png"]),
+                "rule_params": _json.dumps(_calibration_params()),
+            },
+            files=[("images", ("uploaded.png", png, "image/png"))],
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sample_count"] == 2
+
+
+def test_calibrate_with_no_samples_at_all_is_400(client, segmentation_active):
+    resp = client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-S", "threshold": "0.5",
+            "decision_rule": "concentricity", "image_paths": "[]",
+        },
+    )
+    assert resp.status_code == 400
