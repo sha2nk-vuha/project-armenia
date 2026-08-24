@@ -4,13 +4,14 @@ import { Label } from "./ui/label";
 interface Props {
   value: number;
   onChange: (value: number) => void;
+  label?: string;
 }
 
-export function ThresholdControl({ value, onChange }: Props) {
+export function ThresholdControl({ value, onChange, label = "Threshold" }: Props) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <Label>Threshold</Label>
+        <Label>{label}</Label>
         <span className="text-sm font-mono font-medium text-yellow-600">
           {value.toFixed(2)}
         </span>

@@ -111,3 +111,41 @@ def test_get_inspections_in_range_no_customer_filter_returns_all(db):
 
     results = get_inspections_in_range(db, start, end)
     assert len(results) == 3
+
+
+def test_create_inspection_defaults_to_anomaly_feature(db):
+    record = _make(db)
+    assert record.feature == "anomaly_detection"
+
+
+def test_create_inspection_presence_allows_null_score_and_images(db):
+    # Presence/Absence records carry no anomaly score or heatmap/segmentation.
+    record = create_inspection(
+        db,
+        sku_name="SKU-P",
+        threshold=0.5,
+        verdict="ok",
+        model_version="rfdetr-nano",
+        feature="presence_absence",
+    )
+    assert record.feature == "presence_absence"
+    assert record.anomaly_score is None
+    assert record.heatmap_image is None
+    assert record.segmentation_image is None
+
+
+def test_get_stats_scoped_by_feature(db):
+    _make(db, verdict="ok")  # anomaly
+    _make(db, verdict="not_ok")  # anomaly
+    create_inspection(
+        db, sku_name="SKU-P", threshold=0.5, verdict="ok",
+        model_version="rfdetr-nano", feature="presence_absence",
+    )
+
+    anomaly_stats = get_stats(db, feature="anomaly_detection")
+    presence_stats = get_stats(db, feature="presence_absence")
+
+    assert anomaly_stats["total"] == 2
+    assert presence_stats["total"] == 1
+    assert presence_stats["ok"] == 1
+

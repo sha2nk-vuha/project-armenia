@@ -1,6 +1,7 @@
-import { Upload } from "lucide-react";
+import { FolderUp } from "lucide-react";
 import { Label } from "./ui/label";
 import { ThresholdControl } from "./ThresholdControl";
+import type { FeatureInfo } from "../api/client";
 
 interface Props {
   skus: string[];
@@ -8,10 +9,15 @@ interface Props {
   threshold: number;
   customerName: string;
   modelLoaded: boolean;
+  features: FeatureInfo[];
+  activeFeature: string | null;
+  featureSwitching: boolean;
+  thresholdLabel: string;
+  onFeatureChange: (feature: string) => void;
   onSkuChange: (sku: string) => void;
   onThresholdChange: (value: number) => void;
   onCustomerChange: (value: string) => void;
-  onUpload: (file: File) => void;
+  onUploadDirectory: (files: FileList) => void;
 }
 
 export function InferencePanel({
@@ -20,15 +26,51 @@ export function InferencePanel({
   threshold,
   customerName,
   modelLoaded,
+  features,
+  activeFeature,
+  featureSwitching,
+  thresholdLabel,
+  onFeatureChange,
   onSkuChange,
   onThresholdChange,
   onCustomerChange,
-  onUpload,
+  onUploadDirectory,
 }: Props) {
   const canUpload = modelLoaded && !!selectedSku;
 
+  // `webkitdirectory`/`directory` are non-standard input attributes not present
+  // in React's typings, so they're spread in as untyped props.
+  const directoryProps = {
+    webkitdirectory: "",
+    directory: "",
+    multiple: true,
+  } as Record<string, unknown>;
+
   return (
     <div className="flex flex-col gap-4 p-4">
+      <div className="space-y-1.5">
+        <Label htmlFor="feature">Feature</Label>
+        <select
+          id="feature"
+          value={activeFeature ?? ""}
+          onChange={(e) => onFeatureChange(e.target.value)}
+          disabled={features.length === 0 || featureSwitching}
+          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-yellow-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <option value="" disabled>
+            {features.length ? "Select a feature…" : "No features"}
+          </option>
+          {features.map((f) => (
+            <option key={f.name} value={f.name}>
+              {f.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-[11px] text-gray-400">
+          {featureSwitching ? "Switching feature…" : "Switching loads that feature's model."}
+        </p>
+      </div>
+
       <div className="space-y-1.5">
         <Label htmlFor="customer-name">Customer Name</Label>
         <input
@@ -64,7 +106,7 @@ export function InferencePanel({
         </p>
       </div>
 
-      <ThresholdControl value={threshold} onChange={onThresholdChange} />
+      <ThresholdControl value={threshold} onChange={onThresholdChange} label={thresholdLabel} />
 
       {!modelLoaded && (
         <p className="text-xs text-amber-600">
@@ -73,32 +115,33 @@ export function InferencePanel({
       )}
 
       <div className="space-y-1.5 border-t border-gray-100 pt-4">
-        <Label htmlFor="image-upload">Upload your own</Label>
+        <Label htmlFor="directory-upload">Upload a folder</Label>
         <label
-          htmlFor="image-upload"
+          htmlFor="directory-upload"
           className={`flex flex-col items-center justify-center w-full h-24 border-2 border-dashed rounded-lg transition-colors text-gray-400 ${
             canUpload
               ? "border-gray-300 cursor-pointer hover:border-yellow-400 hover:bg-yellow-50"
               : "border-gray-200 cursor-not-allowed opacity-60"
           }`}
         >
-          <Upload className="h-5 w-5" />
-          <span className="text-xs mt-1">Click to upload</span>
+          <FolderUp className="h-5 w-5" />
+          <span className="text-xs mt-1">Click to select a folder</span>
           <input
-            id="image-upload"
+            id="directory-upload"
             type="file"
             accept="image/*"
             className="hidden"
             disabled={!canUpload}
+            {...directoryProps}
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onUpload(f);
+              const files = e.target.files;
+              if (files && files.length > 0) onUploadDirectory(files);
               e.target.value = "";
             }}
           />
         </label>
         <p className="text-[11px] text-gray-400">
-          Infers immediately, tagged with the selected SKU.
+          Browse the folder's images, then click any to inspect it.
         </p>
       </div>
     </div>

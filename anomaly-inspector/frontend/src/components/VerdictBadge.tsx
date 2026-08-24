@@ -3,10 +3,11 @@ import { cn } from "../lib/utils";
 
 interface Props {
   verdict: "ok" | "not_ok" | null;
-  anomalyScore: number | null;
+  score: number | null;
+  scoreLabel?: string;
 }
 
-export function VerdictBadge({ verdict, anomalyScore }: Props) {
+export function VerdictBadge({ verdict, score, scoreLabel = "Score" }: Props) {
   if (verdict === null) {
     return (
       <div className="flex items-center justify-center h-20 rounded-2xl bg-gray-50 border border-dashed border-gray-200">
@@ -33,9 +34,9 @@ export function VerdictBadge({ verdict, anomalyScore }: Props) {
         )}
         <span className="text-xl font-bold">{isOk ? "OK" : "NOT OK"}</span>
       </div>
-      {anomalyScore !== null && (
+      {score !== null && (
         <span className="text-xs font-mono opacity-80">
-          Anomaly Score: {anomalyScore.toFixed(4)}
+          {scoreLabel}: {score.toFixed(4)}
         </span>
       )}
     </div>
