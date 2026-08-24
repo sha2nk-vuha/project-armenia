@@ -8,12 +8,17 @@ import type {
   CascadeSpec,
   CascadeStageSpec,
   DecisionRuleInfo,
+  ModelInfo,
 } from "../api/client";
 
 interface Props {
   options: CascadeOptions;
   spec: CascadeSpec;
   disabled?: boolean;
+  // Which Features have a model uploaded, and how to upload one for a stage.
+  loadedModels: Record<string, ModelInfo | undefined>;
+  uploadingFeature: string | null;
+  onUploadModel: (feature: string, model: File, version: string, sidecar: File | null) => void;
   onChange: (spec: CascadeSpec) => void;
 }
 
@@ -45,7 +50,15 @@ function newStage(feat: CascadeFeatureOption): CascadeStageSpec {
   };
 }
 
-export function CascadeBuilder({ options, spec, disabled, onChange }: Props) {
+export function CascadeBuilder({
+  options,
+  spec,
+  disabled,
+  loadedModels,
+  uploadingFeature,
+  onUploadModel,
+  onChange,
+}: Props) {
   const patch = (next: Partial<CascadeSpec>) => onChange({ ...spec, ...next });
 
   const setStage = (i: number, next: CascadeStageSpec) => {
@@ -173,6 +186,16 @@ export function CascadeBuilder({ options, spec, disabled, onChange }: Props) {
                 </select>
               )}
 
+              <StageModelRow
+                feature={stage.feature}
+                model={loadedModels[stage.feature]}
+                uploading={uploadingFeature === stage.feature}
+                disabled={disabled}
+                onUpload={(model, version, sidecar) =>
+                  onUploadModel(stage.feature, model, version, sidecar)
+                }
+              />
+
               <ThresholdRow
                 label={feat?.threshold_label ?? "Threshold"}
                 value={stage.threshold}
@@ -229,6 +252,70 @@ function ThresholdRow({
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full accent-yellow-400"
       />
+    </div>
+  );
+}
+
+
+function StageModelRow({
+  feature,
+  model,
+  uploading,
+  disabled,
+  onUpload,
+}: {
+  feature: string;
+  model: ModelInfo | undefined;
+  uploading: boolean;
+  disabled?: boolean;
+  onUpload: (model: File, version: string, sidecar: File | null) => void;
+}) {
+  // One picker takes the .onnx and, optionally, its .json sidecar together.
+  const inputId = `stage-model-${feature}`;
+  const handleFiles = (files: FileList | null) => {
+    if (!files) return;
+    const list = Array.from(files);
+    const onnx = list.find((f) => f.name.toLowerCase().endsWith(".onnx"));
+    const sidecar = list.find((f) => f.name.toLowerCase().endsWith(".json")) ?? null;
+    if (!onnx) return;
+    const version = onnx.name.replace(/\.onnx$/i, "");
+    onUpload(onnx, version, sidecar);
+  };
+
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-white px-2.5 py-1.5">
+      <span
+        className={`h-2 w-2 shrink-0 rounded-full ${model ? "bg-green-500" : "bg-red-400"}`}
+      />
+      <span className="min-w-0 flex-1 truncate text-[11px] text-gray-600">
+        {uploading
+          ? "Uploading…"
+          : model
+            ? `${model.model_version} (${model.runtime})`
+            : "No model loaded"}
+      </span>
+      <label
+        htmlFor={inputId}
+        className={`shrink-0 cursor-pointer rounded px-2 py-0.5 text-[11px] font-medium ${
+          disabled || uploading
+            ? "cursor-not-allowed text-gray-300"
+            : "text-yellow-700 hover:bg-yellow-50"
+        }`}
+      >
+        {model ? "Replace" : "Upload"}
+        <input
+          id={inputId}
+          type="file"
+          accept=".onnx,.json"
+          multiple
+          className="hidden"
+          disabled={disabled || uploading}
+          onChange={(e) => {
+            handleFiles(e.target.files);
+            e.target.value = "";
+          }}
+        />
+      </label>
     </div>
   );
 }

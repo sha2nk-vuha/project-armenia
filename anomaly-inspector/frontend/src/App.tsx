@@ -11,6 +11,7 @@ import {
   type CalibrationState,
   type CascadeOptions,
   type CascadeSpec,
+  type ModelInfo,
 } from "./api/client";
 import { SettingsModal } from "./components/SettingsModal";
 import { ReportModal } from "./components/ReportModal";
@@ -97,6 +98,9 @@ export default function App() {
   // travels per request, so the browser is its source of truth.
   const [cascadeOptions, setCascadeOptions] = useState<CascadeOptions | null>(null);
   const [cascadeSpec, setCascadeSpec] = useState<CascadeSpec | null>(null);
+  // Which Features have a model uploaded (per-Feature store; no defaults load).
+  const [loadedModels, setLoadedModels] = useState<Record<string, ModelInfo>>({});
+  const [uploadingFeature, setUploadingFeature] = useState<string | null>(null);
 
   const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
@@ -116,6 +120,14 @@ export default function App() {
   const modelLoaded = !!modelStatus;
   const isCascade = activeFeature === "cascade";
   const activeRule = decisionRules.find((r) => r.name === selectedRule) ?? null;
+  // Can an inspection run? Cascade needs a model for every stage's Feature;
+  // single-Feature mode needs one for the active Feature.
+  const cascadeReady =
+    isCascade &&
+    !!cascadeSpec &&
+    cascadeSpec.stages.length > 0 &&
+    cascadeSpec.stages.every((st) => !!loadedModels[st.feature]);
+  const canInfer = isCascade ? cascadeReady : !!activeFeature && !!loadedModels[activeFeature];
   // Image groups are the gallery's categories (dataset subfolders), which is how
   // an operator already separates known-good caps from the rest.
   const calibrationGroups = Array.from(new Set(images.map((i) => i.category))).sort();
@@ -138,14 +150,15 @@ export default function App() {
     [setupWidth]
   );
 
-  // On load, reflect whatever model the backend already has (it auto-loads the
-  // bundled default model on startup) and fetch the browsable SKU list.
+  // On load, reflect which models are already uploaded (nothing auto-loads) and
+  // fetch the browsable SKU list.
   useEffect(() => {
     api
       .getStatus()
       .then((status) => {
         setFeatures(status.features ?? []);
         setActiveFeature(status.active_feature ?? null);
+        setLoadedModels(status.loaded_models ?? {});
         if (status.model_loaded) {
           setModelStatus({
             status: "loaded",
@@ -304,7 +317,29 @@ export default function App() {
 
   const handleModelLoaded = useCallback((result: LoadModelResponse) => {
     setModelStatus(result);
-  }, []);
+    // Keep the per-Feature indicators and cascade options in step with uploads.
+    api.getStatus().then((st) => setLoadedModels(st.loaded_models ?? {})).catch(() => {});
+    if (isCascade) api.getCascadeOptions().then(setCascadeOptions).catch(() => {});
+  }, [isCascade]);
+
+  // Upload a model (and optional sidecar) for one cascade stage's Feature.
+  const handleUploadStageModel = useCallback(
+    async (feature: string, model: File, version: string, sidecar: File | null) => {
+      setUploadingFeature(feature);
+      setInferError(null);
+      try {
+        await api.loadModel(model, version, feature, sidecar);
+        const [st, opts] = await Promise.all([api.getStatus(), api.getCascadeOptions()]);
+        setLoadedModels(st.loaded_models ?? {});
+        setCascadeOptions(opts);
+      } catch (e) {
+        setInferError(e instanceof Error ? e.message : "Model upload failed.");
+      } finally {
+        setUploadingFeature(null);
+      }
+    },
+    []
+  );
 
   const handleFeatureChange = useCallback(
     async (feature: string) => {
@@ -370,7 +405,7 @@ export default function App() {
   }, [selectedSku, activeFeature, selectedRule]);
 
   async function runInferByPath(path: string) {
-    if (!modelLoaded || !selectedSku || inferringKey) return;
+    if (!canInfer || !selectedSku || inferringKey) return;
     const uploaded = uploadedFiles[path];
     const image = images.find((i) => i.path === path);
     setSelectedPath(path);
@@ -452,12 +487,15 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2">
           <ReportModal customerName={customerName} />
-          <SettingsModal
-            onModelLoaded={handleModelLoaded}
-            isLoaded={modelLoaded}
-            modelVersion={modelStatus?.model_version}
-            runtime={modelStatus?.runtime}
-          />
+          {!isCascade && (
+            <SettingsModal
+              onModelLoaded={handleModelLoaded}
+              feature={activeFeature}
+              isLoaded={!!activeFeature && !!loadedModels[activeFeature]}
+              modelVersion={activeFeature ? loadedModels[activeFeature]?.model_version : undefined}
+              runtime={activeFeature ? loadedModels[activeFeature]?.runtime : undefined}
+            />
+          )}
         </div>
       </header>
 
@@ -494,6 +532,9 @@ export default function App() {
             isCascade={isCascade}
             cascadeOptions={cascadeOptions}
             cascadeSpec={cascadeSpec}
+            loadedModels={loadedModels}
+            uploadingFeature={uploadingFeature}
+            onUploadModel={handleUploadStageModel}
             onCascadeChange={setCascadeSpec}
             onRuleChange={handleRuleChange}
             onRuleParamChange={handleRuleParamChange}
@@ -533,7 +574,7 @@ export default function App() {
               selectedPath={selectedPath}
               inferringPath={inferringKey}
               verdicts={verdicts}
-              disabled={!modelLoaded || !!inferringKey}
+              disabled={!canInfer || !!inferringKey}
               onSelect={runInferByPath}
             />
           </div>

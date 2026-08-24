@@ -9,6 +9,7 @@ import type {
   CascadeSpec,
   DecisionRuleInfo,
   FeatureInfo,
+  ModelInfo,
   RuleParams,
 } from "../api/client";
 
@@ -33,6 +34,9 @@ interface Props {
   isCascade: boolean;
   cascadeOptions: CascadeOptions | null;
   cascadeSpec: CascadeSpec | null;
+  loadedModels: Record<string, ModelInfo | undefined>;
+  uploadingFeature: string | null;
+  onUploadModel: (feature: string, model: File, version: string, sidecar: File | null) => void;
   onCascadeChange: (spec: CascadeSpec) => void;
   onRuleChange: (rule: string) => void;
   onRuleParamChange: (name: string, value: unknown) => void;
@@ -67,6 +71,9 @@ export function InferencePanel({
   isCascade,
   cascadeOptions,
   cascadeSpec,
+  loadedModels,
+  uploadingFeature,
+  onUploadModel,
   onCascadeChange,
   onRuleChange,
   onRuleParamChange,
@@ -79,7 +86,7 @@ export function InferencePanel({
   onCustomerChange,
   onUploadDirectory,
 }: Props) {
-  const canUpload = modelLoaded && !!selectedSku;
+  const canUpload = (isCascade || modelLoaded) && !!selectedSku;
 
   // `webkitdirectory`/`directory` are non-standard input attributes not present
   // in React's typings, so they're spread in as untyped props.
@@ -155,6 +162,9 @@ export function InferencePanel({
             options={cascadeOptions}
             spec={cascadeSpec}
             disabled={featureSwitching}
+            loadedModels={loadedModels}
+            uploadingFeature={uploadingFeature}
+            onUploadModel={onUploadModel}
             onChange={onCascadeChange}
           />
         ) : (
@@ -186,9 +196,9 @@ export function InferencePanel({
         </>
       )}
 
-      {!modelLoaded && (
+      {!isCascade && !modelLoaded && (
         <p className="text-xs text-amber-600">
-          Load a model via the ⚙ settings before inferring.
+          Upload a model via the ⚙ Model button before inferring.
         </p>
       )}
 

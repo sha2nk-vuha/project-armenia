@@ -3,6 +3,14 @@ export interface LoadModelResponse {
   runtime: string;
   input_shape: number[];
   model_version: string;
+  feature?: string;
+}
+
+// A loaded model's summary, shown by the per-Feature / per-stage indicator.
+export interface ModelInfo {
+  model_version: string;
+  runtime: string;
+  input_shape: number[];
 }
 
 export interface Detection {
@@ -113,6 +121,8 @@ export interface CascadeFeatureOption {
   labels: Record<string, string>;
   default_rule: string | null;
   rules: DecisionRuleInfo[];
+  // The model uploaded for this Feature, or null until one is uploaded.
+  model: ModelInfo | null;
 }
 
 export interface CombinatorInfo {
@@ -158,6 +168,8 @@ export interface StatusResponse {
   input_shape?: number[];
   active_feature?: string | null;
   features?: FeatureInfo[];
+  // Which Features currently have a model loaded, keyed by Feature name.
+  loaded_models?: Record<string, ModelInfo>;
 }
 
 export interface DatasetImage {
@@ -200,10 +212,17 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  async loadModel(file: File, modelVersion: string): Promise<LoadModelResponse> {
+  async loadModel(
+    file: File,
+    modelVersion: string,
+    feature?: string,
+    sidecar?: File | null
+  ): Promise<LoadModelResponse> {
     const form = new FormData();
     form.append("model_file", file);
     form.append("model_version", modelVersion);
+    if (feature) form.append("feature", feature);
+    if (sidecar) form.append("sidecar_file", sidecar);
     const res = await fetch("/api/load-model", { method: "POST", body: form });
     return handleResponse<LoadModelResponse>(res);
   },

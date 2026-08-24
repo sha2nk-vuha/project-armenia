@@ -14,12 +14,14 @@ import {
 
 interface Props {
   onModelLoaded: (result: LoadModelResponse) => void;
+  // The Feature this upload is for; the model lands in that Feature's store slot.
+  feature?: string | null;
   isLoaded: boolean;
   modelVersion?: string;
   runtime?: string;
 }
 
-export function SettingsModal({ onModelLoaded, isLoaded, modelVersion, runtime }: Props) {
+export function SettingsModal({ onModelLoaded, feature, isLoaded, modelVersion, runtime }: Props) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [version, setVersion] = useState("");
@@ -34,7 +36,7 @@ export function SettingsModal({ onModelLoaded, isLoaded, modelVersion, runtime }
     setLoading(true);
     setError(null);
     try {
-      const result = await api.loadModel(file, version.trim());
+      const result = await api.loadModel(file, version.trim(), feature ?? undefined);
       onModelLoaded(result);
       setOpen(false);
     } catch (e) {
