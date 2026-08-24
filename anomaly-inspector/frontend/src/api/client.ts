@@ -70,9 +70,23 @@ export interface DecisionRulesResponse {
 
 export type RuleParams = Record<string, unknown>;
 
+// One stage's outcome inside a Cascade result. `evaluated` is false for a stage
+// the cascade short-circuited past.
+export interface StageResult {
+  feature: string;
+  decision_rule: string;
+  verdict: "ok" | "not_ok" | "skipped";
+  evaluated: boolean;
+  score: number | null;
+  score_label: string;
+  reason: string;
+  image: string | null;
+  detections: Detection[] | null;
+}
+
 export interface InferResponse {
   feature: string;
-  // Which Decision Rule produced the Verdict.
+  // Which Decision Rule (or, for a cascade, which Combinator) produced it.
   decision_rule: string;
   verdict: "ok" | "not_ok";
   // The rule's primary scalar; null for rules without one. `score_label` names it.
@@ -86,6 +100,42 @@ export interface InferResponse {
   annotated_image: string | null;
   overlay_image: string | null;
   detections: Detection[] | null;
+  // Cascade only: the ordered per-stage breakdown.
+  stages: StageResult[];
+}
+
+// A cascadable Feature and everything the stage builder needs for it, none of
+// which requires loading the model.
+export interface CascadeFeatureOption {
+  name: string;
+  label: string;
+  threshold_label: string;
+  labels: Record<string, string>;
+  default_rule: string | null;
+  rules: DecisionRuleInfo[];
+}
+
+export interface CombinatorInfo {
+  name: string;
+  label: string;
+}
+
+export interface CascadeOptions {
+  features: CascadeFeatureOption[];
+  combinators: CombinatorInfo[];
+}
+
+export interface CascadeStageSpec {
+  feature: string;
+  rule: string;
+  threshold: number;
+  params: RuleParams;
+}
+
+export interface CascadeSpec {
+  combinator: string;
+  short_circuit: boolean;
+  stages: CascadeStageSpec[];
 }
 
 export interface StatsResponse {
@@ -126,7 +176,8 @@ function inferForm(
   threshold: number,
   customerName: string,
   decisionRule?: string | null,
-  ruleParams?: RuleParams | null
+  ruleParams?: RuleParams | null,
+  cascadeSpec?: CascadeSpec | null
 ): FormData {
   const form = new FormData();
   form.append("sku_name", skuName);
@@ -136,6 +187,7 @@ function inferForm(
   if (ruleParams && Object.keys(ruleParams).length > 0) {
     form.append("rule_params", JSON.stringify(ruleParams));
   }
+  if (cascadeSpec) form.append("cascade_spec", JSON.stringify(cascadeSpec));
   return form;
 }
 
@@ -162,9 +214,10 @@ export const api = {
     threshold: number,
     customerName: string,
     decisionRule?: string | null,
-    ruleParams?: RuleParams | null
+    ruleParams?: RuleParams | null,
+    cascadeSpec?: CascadeSpec | null
   ): Promise<InferResponse> {
-    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams);
+    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams, cascadeSpec);
     form.append("image", image);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
@@ -176,12 +229,18 @@ export const api = {
     threshold: number,
     customerName: string,
     decisionRule?: string | null,
-    ruleParams?: RuleParams | null
+    ruleParams?: RuleParams | null,
+    cascadeSpec?: CascadeSpec | null
   ): Promise<InferResponse> {
-    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams);
+    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams, cascadeSpec);
     form.append("image_path", imagePath);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
+  },
+
+  async getCascadeOptions(): Promise<CascadeOptions> {
+    const res = await fetch("/api/cascade/options");
+    return handleResponse<CascadeOptions>(res);
   },
 
   async getDecisionRules(): Promise<DecisionRulesResponse> {

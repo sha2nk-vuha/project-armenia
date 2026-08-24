@@ -9,12 +9,15 @@ import {
   type DecisionRuleInfo,
   type RuleParams,
   type CalibrationState,
+  type CascadeOptions,
+  type CascadeSpec,
 } from "./api/client";
 import { SettingsModal } from "./components/SettingsModal";
 import { ReportModal } from "./components/ReportModal";
 import { InferencePanel } from "./components/InferencePanel";
 import { ImageGallery } from "./components/ImageGallery";
 import { ResultsDisplay } from "./components/ResultsDisplay";
+import { CascadeStages } from "./components/CascadeStages";
 import { VerdictBadge } from "./components/VerdictBadge";
 import { StatsPanel } from "./components/StatsPanel";
 import { ResizeHandle } from "./components/ResizeHandle";
@@ -25,6 +28,33 @@ const MIN_GALLERY_WIDTH = 200;
 
 const clamp = (v: number, min: number, max: number) =>
   Math.min(Math.max(v, min), Math.max(min, max));
+
+// A starter cascade: the anomaly + segmentation AND from the feature request
+// when both are available, else a single stage of the first cascadable feature.
+function defaultCascadeSpec(options: CascadeOptions): CascadeSpec {
+  const pick = (name: string) => options.features.find((f) => f.name === name);
+  const seed = (f: NonNullable<ReturnType<typeof pick>>) => {
+    const rule = f.rules.find((r) => r.name === f.default_rule) ?? f.rules[0];
+    return {
+      feature: f.name,
+      rule: rule?.name ?? "",
+      threshold: 0.5,
+      params: {
+        ...Object.fromEntries((rule?.params ?? []).map((p) => [p.name, p.default])),
+        ...(rule?.defaults ?? {}),
+      },
+    };
+  };
+  const anomaly = pick("anomaly_detection");
+  const segmentation = pick("segmentation");
+  const stages =
+    anomaly && segmentation
+      ? [seed(anomaly), seed(segmentation)]
+      : options.features[0]
+        ? [seed(options.features[0])]
+        : [];
+  return { combinator: "and", short_circuit: true, stages };
+}
 
 // Controls are seeded from the backend's effective defaults (schema + model
 // sidecar). The browser echoes these back on every inference, so seeding from
@@ -63,6 +93,11 @@ export default function App() {
   const [calibrationGroup, setCalibrationGroup] = useState<string | null>(null);
   const [calibrating, setCalibrating] = useState(false);
 
+  // Cascade mode: options for the builder and the spec being edited. The spec
+  // travels per request, so the browser is its source of truth.
+  const [cascadeOptions, setCascadeOptions] = useState<CascadeOptions | null>(null);
+  const [cascadeSpec, setCascadeSpec] = useState<CascadeSpec | null>(null);
+
   const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -79,6 +114,7 @@ export default function App() {
   const [resultsWidth, setResultsWidth] = useState(DEFAULT_RESULTS_WIDTH);
 
   const modelLoaded = !!modelStatus;
+  const isCascade = activeFeature === "cascade";
   const activeRule = decisionRules.find((r) => r.name === selectedRule) ?? null;
   // Image groups are the gallery's categories (dataset subfolders), which is how
   // an operator already separates known-good caps from the rest.
@@ -144,6 +180,17 @@ export default function App() {
   useEffect(() => {
     if (modelLoaded) void loadDecisionRules();
   }, [modelLoaded, activeFeature, loadDecisionRules]);
+
+  useEffect(() => {
+    if (!isCascade || cascadeOptions) return;
+    api
+      .getCascadeOptions()
+      .then((opts) => {
+        setCascadeOptions(opts);
+        setCascadeSpec((prev) => prev ?? defaultCascadeSpec(opts));
+      })
+      .catch(() => {});
+  }, [isCascade, cascadeOptions]);
 
   // A taught baseline belongs to (SKU, rule), so refetch when either changes and
   // fold it over the schema/sidecar defaults.
@@ -331,9 +378,10 @@ export default function App() {
     setInferError(null);
     setInferringKey(path);
     try {
+      const cascade = isCascade ? cascadeSpec : null;
       const result = uploaded
-        ? await api.infer(uploaded, selectedSku, threshold, customerName, selectedRule, ruleParams)
-        : await api.inferByPath(path, selectedSku, threshold, customerName, selectedRule, ruleParams);
+        ? await api.infer(uploaded, selectedSku, threshold, customerName, selectedRule, ruleParams, cascade)
+        : await api.inferByPath(path, selectedSku, threshold, customerName, selectedRule, ruleParams, cascade);
       setInferResult(result);
       setVerdicts((v) => ({ ...v, [path]: result.verdict }));
       setStats(await api.getStats(selectedSku, activeFeature, selectedRule));
@@ -443,6 +491,10 @@ export default function App() {
             calibrationGroups={calibrationGroups}
             calibrationGroup={calibrationGroup}
             calibrating={calibrating}
+            isCascade={isCascade}
+            cascadeOptions={cascadeOptions}
+            cascadeSpec={cascadeSpec}
+            onCascadeChange={setCascadeSpec}
             onRuleChange={handleRuleChange}
             onRuleParamChange={handleRuleParamChange}
             onCalibrationGroupChange={setCalibrationGroup}
@@ -512,6 +564,10 @@ export default function App() {
             <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
               {inferError}
             </p>
+          )}
+
+          {inferResult?.feature === "cascade" && (
+            <CascadeStages stages={inferResult.stages ?? []} />
           )}
 
           <ResultsDisplay

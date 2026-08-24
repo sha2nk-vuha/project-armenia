@@ -2,8 +2,11 @@ import { FolderUp } from "lucide-react";
 import { Label } from "./ui/label";
 import { ThresholdControl } from "./ThresholdControl";
 import { DecisionRuleControl } from "./DecisionRuleControl";
+import { CascadeBuilder } from "./CascadeBuilder";
 import type {
   CalibrationState,
+  CascadeOptions,
+  CascadeSpec,
   DecisionRuleInfo,
   FeatureInfo,
   RuleParams,
@@ -27,6 +30,10 @@ interface Props {
   calibrationGroups: string[];
   calibrationGroup: string | null;
   calibrating: boolean;
+  isCascade: boolean;
+  cascadeOptions: CascadeOptions | null;
+  cascadeSpec: CascadeSpec | null;
+  onCascadeChange: (spec: CascadeSpec) => void;
   onRuleChange: (rule: string) => void;
   onRuleParamChange: (name: string, value: unknown) => void;
   onCalibrationGroupChange: (group: string) => void;
@@ -57,6 +64,10 @@ export function InferencePanel({
   calibrationGroups,
   calibrationGroup,
   calibrating,
+  isCascade,
+  cascadeOptions,
+  cascadeSpec,
+  onCascadeChange,
   onRuleChange,
   onRuleParamChange,
   onCalibrationGroupChange,
@@ -138,25 +149,42 @@ export function InferencePanel({
         </p>
       </div>
 
-      <ThresholdControl value={threshold} onChange={onThresholdChange} label={thresholdLabel} />
+      {isCascade ? (
+        cascadeOptions && cascadeSpec ? (
+          <CascadeBuilder
+            options={cascadeOptions}
+            spec={cascadeSpec}
+            disabled={featureSwitching}
+            onChange={onCascadeChange}
+          />
+        ) : (
+          <p className="text-[11px] text-gray-400 border-t border-gray-100 pt-4">
+            Loading cascade options…
+          </p>
+        )
+      ) : (
+        <>
+          <ThresholdControl value={threshold} onChange={onThresholdChange} label={thresholdLabel} />
 
-      <DecisionRuleControl
-        rules={decisionRules}
-        labels={classLabels}
-        selected={selectedRule}
-        params={ruleParams}
-        disabled={featureSwitching}
-        calibration={calibration}
-        calibrationGroups={calibrationGroups}
-        calibrationGroup={calibrationGroup}
-        calibrating={calibrating}
-        canCalibrate={!!selectedSku && calibrationGroups.length > 0}
-        onSelect={onRuleChange}
-        onParamChange={onRuleParamChange}
-        onCalibrationGroupChange={onCalibrationGroupChange}
-        onCalibrate={onCalibrate}
-        onClearCalibration={onClearCalibration}
-      />
+          <DecisionRuleControl
+            rules={decisionRules}
+            labels={classLabels}
+            selected={selectedRule}
+            params={ruleParams}
+            disabled={featureSwitching}
+            calibration={calibration}
+            calibrationGroups={calibrationGroups}
+            calibrationGroup={calibrationGroup}
+            calibrating={calibrating}
+            canCalibrate={!!selectedSku && calibrationGroups.length > 0}
+            onSelect={onRuleChange}
+            onParamChange={onRuleParamChange}
+            onCalibrationGroupChange={onCalibrationGroupChange}
+            onCalibrate={onCalibrate}
+            onClearCalibration={onClearCalibration}
+          />
+        </>
+      )}
 
       {!modelLoaded && (
         <p className="text-xs text-amber-600">
