@@ -325,3 +325,102 @@ def test_presence_stats_scoped_to_feature(client, presence_active):
     assert body["ok"] == 1
     # Anomaly feature has no records.
     assert client.get("/api/stats?feature=anomaly_detection").json()["total"] == 0
+
+
+def test_decision_rules_empty_without_active_feature(client):
+    body = client.get("/api/decision-rules").json()
+    assert body["active_feature"] is None
+    assert body["rules"] == []
+
+
+def test_decision_rules_lists_compatible_rules_for_active_feature(client, loaded_model):
+    body = client.get("/api/decision-rules").json()
+    names = {r["name"] for r in body["rules"]}
+    # Anomaly Detection produces an anomaly map, so only that rule can consume it.
+    assert names == {"anomaly_threshold"}
+
+
+def test_infer_reports_which_rule_decided_and_why(client, loaded_model):
+    body = client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-A", "threshold": "0.5"},
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    ).json()
+
+    assert body["decision_rule"] == "anomaly_threshold"
+    assert body["score_label"] == "Anomaly Score"
+    assert "anomaly score" in body["reason"]
+    assert body["metrics"]["threshold"] == 0.5
+    # Deprecated alias kept until the GUI moves to `score`.
+    assert body["anomaly_score"] == body["score"]
+
+
+def test_infer_rejects_malformed_rule_params(client, loaded_model):
+    resp = client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-A", "threshold": "0.5", "rule_params": "{not json"},
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 400
+
+
+def test_infer_rejects_rule_incompatible_with_active_feature(client, loaded_model):
+    # expected_classes consumes detections; Anomaly Detection produces a map.
+    resp = client.post(
+        "/api/infer",
+        data={
+            "sku_name": "SKU-A",
+            "threshold": "0.5",
+            "decision_rule": "expected_classes",
+        },
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 422
+    assert "expected_classes" in resp.json()["detail"]
+
+
+def test_infer_persists_rule_for_scoped_stats(client, loaded_model):
+    # Proves the rule landed in its column, through the public surface that
+    # reporting actually uses.
+    client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-A", "threshold": "0.5"},
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    )
+
+    scoped = client.get("/api/stats?decision_rule=anomaly_threshold").json()
+    other = client.get("/api/stats?decision_rule=expected_classes").json()
+
+    assert scoped["total"] == 1
+    assert other["total"] == 0
+
+
+def test_presence_infer_overrides_expected_classes_from_request(client, presence_active):
+    # Params travel per-request like `threshold`; the sidecar only seeds defaults.
+    body = client.post(
+        "/api/infer",
+        data={
+            "sku_name": "SKU-P",
+            "threshold": "0.5",
+            "rule_params": '{"expected_classes": ["no-gasket"]}',
+        },
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    ).json()
+
+    assert body["decision_rule"] == "expected_classes"
+    assert body["verdict"] == "not_ok"
+    assert body["metrics"]["missing"] == ["no-gasket"]
+
+
+def test_presence_infer_unknown_class_name_is_a_clear_422(client, presence_active):
+    resp = client.post(
+        "/api/infer",
+        data={
+            "sku_name": "SKU-P",
+            "threshold": "0.5",
+            "rule_params": '{"expected_classes": ["bottle_cap"]}',
+        },
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 422
+    assert "bottle_cap" in resp.json()["detail"]

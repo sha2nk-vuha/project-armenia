@@ -5,7 +5,6 @@ from inference.rfdetr import (
     Detection,
     PresenceConfig,
     decode_detections,
-    evaluate_presence,
 )
 
 
@@ -17,24 +16,54 @@ def _det(class_id, confidence, box=(0.0, 0.0, 10.0, 10.0)):
     return Detection(class_id=class_id, confidence=confidence, box=box)
 
 
+# Parity: these four cases are the pre-seam `evaluate_presence` contract,
+# now asserted against the Expected Classes Decision Rule that replaced it.
+# Same inputs, same Verdicts.
+
+
+def _presence_verdict(dets, expected_classes, threshold, labels=None):
+    from inference.decision import KIND_DETECTIONS, DecisionContext, DecodedOutput, get
+
+    rule = get("expected_classes")
+    ctx = DecisionContext(
+        output=DecodedOutput(
+            kinds=frozenset({KIND_DETECTIONS}), image_hw=(10, 10), detections=dets
+        ),
+        image_rgb=np.zeros((10, 10, 3), dtype=np.uint8),
+        labels=labels or {1: "cap", 2: "logo"},
+        params={"expected_classes": expected_classes},
+        threshold=threshold,
+    )
+    return rule.evaluate(ctx).verdict
+
+
 def test_presence_ok_when_expected_class_present():
-    dets = [_det(1, 0.9)]
-    assert evaluate_presence(dets, expected_classes=[1], threshold=0.5) == "ok"
+    assert _presence_verdict([_det(1, 0.9)], [1], 0.5) == "ok"
 
 
 def test_presence_nok_when_expected_class_missing():
-    dets = [_det(2, 0.9)]
-    assert evaluate_presence(dets, expected_classes=[1], threshold=0.5) == "not_ok"
+    assert _presence_verdict([_det(2, 0.9)], [1], 0.5) == "not_ok"
 
 
 def test_presence_nok_when_expected_below_threshold():
-    dets = [_det(1, 0.3)]
-    assert evaluate_presence(dets, expected_classes=[1], threshold=0.5) == "not_ok"
+    assert _presence_verdict([_det(1, 0.3)], [1], 0.5) == "not_ok"
 
 
 def test_presence_requires_all_expected_classes():
-    dets = [_det(1, 0.9)]
-    assert evaluate_presence(dets, expected_classes=[1, 2], threshold=0.5) == "not_ok"
+    assert _presence_verdict([_det(1, 0.9)], [1, 2], 0.5) == "not_ok"
+
+
+def test_presence_resolves_expected_classes_by_name():
+    # Config carries names, not ids, so a retrain that reorders classes survives.
+    assert _presence_verdict([_det(1, 0.9)], ["cap"], 0.5) == "ok"
+    assert _presence_verdict([_det(1, 0.9)], ["logo"], 0.5) == "not_ok"
+
+
+def test_presence_unknown_class_name_raises_loudly():
+    from inference.decision import ClassNotFound
+
+    with pytest.raises(ClassNotFound, match="bottle_cap"):
+        _presence_verdict([_det(1, 0.9)], ["bottle_cap"], 0.5)
 
 
 def test_decode_filters_by_confidence_and_scales_boxes():

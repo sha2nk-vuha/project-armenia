@@ -9,7 +9,7 @@ def _make(db, verdict="ok", threshold=0.5, sku="SKU-A", ts=None, customer=""):
     record = create_inspection(
         db,
         sku_name=sku,
-        anomaly_score=0.3 if verdict == "ok" else 0.8,
+        score=0.3 if verdict == "ok" else 0.8,
         threshold=threshold,
         verdict=verdict,
         model_version="v1.0",
@@ -41,7 +41,7 @@ def test_create_inspection_persists_customer_name(db):
     record = create_inspection(
         db,
         sku_name="SKU-C",
-        anomaly_score=0.4,
+        score=0.4,
         threshold=0.5,
         verdict="ok",
         model_version="v1.0",
@@ -129,7 +129,7 @@ def test_create_inspection_presence_allows_null_score_and_images(db):
         feature="presence_absence",
     )
     assert record.feature == "presence_absence"
-    assert record.anomaly_score is None
+    assert record.score is None
     assert record.heatmap_image is None
     assert record.segmentation_image is None
 
@@ -149,3 +149,51 @@ def test_get_stats_scoped_by_feature(db):
     assert presence_stats["total"] == 1
     assert presence_stats["ok"] == 1
 
+
+
+def test_create_inspection_persists_rule_params_and_metrics(db):
+    # Report traceability: a record must be able to say which rule ran, under
+    # what tolerances, and what it measured.
+    import json
+
+    record = create_inspection(
+        db,
+        sku_name="SKU-S",
+        threshold=0.5,
+        verdict="not_ok",
+        model_version="seg-v1",
+        feature="segmentation",
+        score=0.21,
+        decision_rule="concentricity",
+        params={"max_offset_ratio": 0.10},
+        metrics={"offset_ratio": 0.21, "offset_px": 18.4},
+    )
+
+    assert record.decision_rule == "concentricity"
+    assert json.loads(record.params) == {"max_offset_ratio": 0.10}
+    assert json.loads(record.metrics)["offset_px"] == 18.4
+
+
+def test_create_inspection_leaves_rule_fields_null_when_unset(db):
+    record = _make(db)
+    assert record.params is None and record.metrics is None
+
+
+def test_get_stats_scoped_by_decision_rule(db):
+    # Two rules on the same Feature produce OKs that mean different things;
+    # pooling them would report a pass rate nobody can act on.
+    for rule, verdict in (("concentricity", "ok"), ("concentricity", "not_ok"),
+                          ("expected_classes", "ok")):
+        create_inspection(
+            db, sku_name="SKU-S", threshold=0.5, verdict=verdict,
+            model_version="seg-v1", feature="segmentation", decision_rule=rule,
+        )
+
+    conc = get_stats(db, feature="segmentation", decision_rule="concentricity")
+    pres = get_stats(db, feature="segmentation", decision_rule="expected_classes")
+    pooled = get_stats(db, feature="segmentation")
+
+    assert (conc["total"], conc["pass_rate"]) == (2, 50.0)
+    assert (pres["total"], pres["pass_rate"]) == (1, 100.0)
+    # Pooling the two rules gives a third, meaningless number.
+    assert pooled["total"] == 3

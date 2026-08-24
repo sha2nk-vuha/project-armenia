@@ -59,3 +59,56 @@ def generate_segmentation(
 
     _, buf = cv2.imencode(".jpg", result_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return buf.tobytes()
+
+
+def render_annotations(base_rgb: np.ndarray, annotations: list) -> np.ndarray:
+    """Draw a Decision Rule's declarative annotations onto an RGB image.
+
+    Rules return geometry (`Circle`, `Line`, `Point`, `Polygon`, `Text`) rather
+    than rendered bytes, so drawing style lives here and stays consistent across
+    rules. Returns a new RGB array; the caller encodes it.
+    """
+    from inference.decision.base import Circle, Line, Point, Polygon, Text
+
+    if not annotations:
+        return base_rgb
+    canvas = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2BGR).copy()
+
+    def bgr(color: tuple[int, int, int]) -> tuple[int, int, int]:
+        r, g, b = color
+        return (b, g, r)
+
+    for a in annotations:
+        if isinstance(a, Point):
+            cv2.circle(
+                canvas, (int(round(a.x)), int(round(a.y))), a.radius, bgr(a.color),
+                -1 if a.filled else 1, cv2.LINE_AA,
+            )
+        elif isinstance(a, Circle):
+            cv2.circle(
+                canvas, (int(round(a.cx)), int(round(a.cy))), int(round(a.r)),
+                bgr(a.color), a.thickness, cv2.LINE_AA,
+            )
+        elif isinstance(a, Line):
+            cv2.line(
+                canvas, (int(round(a.x1)), int(round(a.y1))),
+                (int(round(a.x2)), int(round(a.y2))), bgr(a.color), a.thickness,
+                cv2.LINE_AA,
+            )
+        elif isinstance(a, Polygon):
+            pts = np.array([[int(round(x)), int(round(y))] for x, y in a.points], dtype=np.int32)
+            cv2.polylines(canvas, [pts], a.closed, bgr(a.color), a.thickness, cv2.LINE_AA)
+        elif isinstance(a, Text):
+            cv2.putText(
+                canvas, a.text, (int(round(a.x)), int(round(a.y))),
+                cv2.FONT_HERSHEY_SIMPLEX, a.scale, bgr(a.color), 1, cv2.LINE_AA,
+            )
+
+    return cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+
+
+def encode_jpeg(image_rgb: np.ndarray, quality: int = 85) -> bytes:
+    """Encode an RGB image as JPEG bytes."""
+    bgr_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    _, buf = cv2.imencode(".jpg", bgr_img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buf.tobytes()

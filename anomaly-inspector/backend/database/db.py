@@ -47,30 +47,43 @@ def _rename_legacy_if_needed(conn) -> None:
     conn.execute(text("ALTER TABLE inspections RENAME TO inspections_legacy"))
 
 
+# Columns renamed across schema versions: {old name: new name}. The legacy
+# copy consults this so a rename does not silently drop the column's data.
+_RENAMED_COLUMNS = {"anomaly_score": "score"}
+
+
 def _copy_from_legacy_if_present(conn) -> None:
     """Copy rows from a renamed legacy table into the fresh table, then drop it.
 
-    Copies only columns common to both tables (the new `feature` column is
-    back-filled by its default). `INSERT OR IGNORE` keeps this safe to re-run if
-    a previous copy was interrupted before the drop.
+    Copies columns common to both tables, mapping any renamed column to its new
+    name (new columns like `feature` are back-filled by their defaults).
+    `INSERT OR IGNORE` keeps this safe to re-run if a previous copy was
+    interrupted before the drop.
     """
     legacy_cols = _table_columns(conn, "inspections_legacy")
     if not legacy_cols:
         return
     new_cols = set(_table_columns(conn, "inspections"))
-    common = [c for c in legacy_cols if c in new_cols]
-    cols = ", ".join(common)
+    pairs = [
+        (old, _RENAMED_COLUMNS.get(old, old))
+        for old in legacy_cols
+        if _RENAMED_COLUMNS.get(old, old) in new_cols
+    ]
+    select_cols = ", ".join(old for old, _ in pairs)
+    insert_cols = ", ".join(new for _, new in pairs)
     conn.execute(text(
-        f"INSERT OR IGNORE INTO inspections ({cols}) SELECT {cols} FROM inspections_legacy"
+        f"INSERT OR IGNORE INTO inspections ({insert_cols})"
+        f" SELECT {select_cols} FROM inspections_legacy"
     ))
     conn.execute(text("DROP TABLE inspections_legacy"))
 
 
 def _add_missing_columns(conn) -> None:
-    """Add columns to an already-nullable table that lacks them (forward-compat).
+    """Bring an already-nullable table up to the current schema (forward-compat).
 
-    create_all will not ALTER an existing table, so add `customer_name` and
-    `feature` when a prior-version DB is missing them.
+    create_all will not ALTER an existing table, so add columns a prior-version
+    DB is missing and apply in-place renames. Every step is guarded on the
+    current PRAGMA, so this is idempotent and safe to re-run.
     """
     cols = {row[1] for row in conn.execute(text("PRAGMA table_info(inspections)"))}
     if "customer_name" not in cols:
@@ -82,6 +95,15 @@ def _add_missing_columns(conn) -> None:
             "ALTER TABLE inspections"
             " ADD COLUMN feature VARCHAR NOT NULL DEFAULT 'anomaly_detection'"
         ))
+    # `anomaly_score` became the Decision Rule's generic primary scalar. Rename
+    # in place rather than adding a second numeric column, so there is exactly
+    # one meaning per column.
+    if "anomaly_score" in cols and "score" not in cols:
+        conn.execute(text("ALTER TABLE inspections RENAME COLUMN anomaly_score TO score"))
+        cols.add("score")
+    for name in ("decision_rule", "params", "metrics"):
+        if name not in cols:
+            conn.execute(text(f"ALTER TABLE inspections ADD COLUMN {name} TEXT"))
 
 
 def get_db():

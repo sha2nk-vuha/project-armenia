@@ -50,9 +50,9 @@ class PresenceConfig:
     mean: tuple[float, float, float] = _IMAGENET_MEAN
     std: tuple[float, float, float] = _IMAGENET_STD
     normalize: bool = True  # False when normalisation is baked into the graph
-    # Default Expected Class policy for the model: the class ids that must be
-    # present for an OK verdict. Overridable per-SKU (persisted) later; empty
-    # means "no policy configured" (see evaluate_presence).
+    # Default Expected Class policy for the model: seeds the params of the
+    # Expected Classes Decision Rule, which owns the verdict logic. Empty
+    # means "no policy configured" (every image passes).
     expected_classes: list[int] = field(default_factory=list)
 
 
@@ -92,22 +92,6 @@ def load_config(path: str) -> PresenceConfig:
         normalize=data.get("normalize", defaults.normalize),
         expected_classes=[int(c) for c in expected] if expected else [],
     )
-
-
-def evaluate_presence(
-    detections: list[Detection],
-    expected_classes: list[int],
-    threshold: float,
-) -> str:
-    """Expected-object rule: OK only if every Expected Class is present.
-
-    A class counts as present when at least one detection of that class scores
-    at or above `threshold` (the detection-confidence floor). See docs/adr and
-    CONTEXT.md ("Expected Class").
-    """
-    present = {d.class_id for d in detections if d.confidence >= threshold}
-    all_present = all(cls in present for cls in expected_classes)
-    return "ok" if all_present else "not_ok"
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -189,15 +173,17 @@ def decode_detections(
     return detections
 
 
-def draw_detections(
+def draw_detections_rgb(
     original_rgb: np.ndarray,
     detections: list[Detection],
     labels: dict[int, str],
-) -> bytes:
-    """Draw detection boxes + class/confidence labels on the original image.
+) -> np.ndarray:
+    """Draw detection boxes + class/confidence labels; returns an RGB array.
 
-    Returns JPEG bytes. Boxes are drawn in the image's own pixel coordinates
-    (the decode already scaled them to the original size).
+    Boxes are drawn in the image's own pixel coordinates (the decode already
+    scaled them to the original size). Returning an array rather than encoded
+    bytes lets a pipeline composite a Decision Rule's annotations on top before
+    a single final encode.
     """
     result_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
     for det in detections:
@@ -215,6 +201,17 @@ def draw_detections(
             1,
             cv2.LINE_AA,
         )
+    return cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
-    _, buf = cv2.imencode(".jpg", result_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+def draw_detections(
+    original_rgb: np.ndarray,
+    detections: list[Detection],
+    labels: dict[int, str],
+) -> bytes:
+    """Draw detection boxes + class/confidence labels. Returns JPEG bytes."""
+    annotated = draw_detections_rgb(original_rgb, detections, labels)
+    _, buf = cv2.imencode(
+        ".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85]
+    )
     return buf.tobytes()

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from sqlalchemy import func
@@ -13,15 +14,27 @@ def create_inspection(
     verdict: str,
     model_version: str,
     feature: str = "anomaly_detection",
-    anomaly_score: float | None = None,
+    score: float | None = None,
+    decision_rule: str | None = None,
+    params: dict | None = None,
+    metrics: dict | None = None,
     heatmap_image: bytes | None = None,
     segmentation_image: bytes | None = None,
     customer_name: str = "",
 ) -> Inspection:
+    """Record one inspection.
+
+    `params` and `metrics` are JSON-encoded: a customer-facing report has to be
+    able to state which Decision Rule ran, under what tolerances, and what it
+    measured (see docs/adr/0005).
+    """
     record = Inspection(
         sku_name=sku_name,
         feature=feature,
-        anomaly_score=anomaly_score,
+        score=score,
+        decision_rule=decision_rule,
+        params=json.dumps(params) if params else None,
+        metrics=json.dumps(metrics) if metrics else None,
         threshold=threshold,
         verdict=verdict,
         model_version=model_version,
@@ -35,12 +48,27 @@ def create_inspection(
     return record
 
 
-def get_stats(db: Session, sku_name: str | None = None, feature: str | None = None) -> dict:
+def get_stats(
+    db: Session,
+    sku_name: str | None = None,
+    feature: str | None = None,
+    decision_rule: str | None = None,
+) -> dict:
+    """Pass-rate stats, scoped by SKU / Feature / Decision Rule.
+
+    Scoping by Decision Rule matters for the same reason ADR 0004 scoped by
+    Feature: two rules on the *same* Feature ("logo is centred" vs "logo is
+    present") produce OKs that mean different things, so pooling them yields a
+    pass rate nobody can act on.
+    """
+
     def _scoped(q):
         if sku_name:
             q = q.filter(Inspection.sku_name == sku_name)
         if feature:
             q = q.filter(Inspection.feature == feature)
+        if decision_rule:
+            q = q.filter(Inspection.decision_rule == decision_rule)
         return q
 
     total = _scoped(db.query(func.count(Inspection.id))).scalar() or 0

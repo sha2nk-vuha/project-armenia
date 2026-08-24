@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 
 from config import FEATURES, PRESENCE_FEATURE
-from inference import engine
+from inference import decision, engine
 from inference.engine import ModelSession
 from inference.pipeline import AnomalyPipeline, PresenceAbsencePipeline
 from inference.rfdetr import PresenceConfig, load_config, sidecar_path
@@ -90,6 +90,19 @@ def current_pipeline():
         cfg = _presence_config or PresenceConfig()
         return PresenceAbsencePipeline(sess, cfg, cfg.expected_classes)
     return AnomalyPipeline(sess)
+
+
+def current_decision_rules() -> list[dict]:
+    """UI metadata for the Decision Rules the active pipeline can run.
+
+    Filtered by the output kinds the active Feature's decode advertises, so the
+    GUI never offers a rule that cannot consume this model's output. Empty when
+    no Feature is active.
+    """
+    pipeline = current_pipeline()
+    if pipeline is None:
+        return []
+    return [decision.describe(r) for r in pipeline.compatible_rules()]
 
 
 def reset() -> None:

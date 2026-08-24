@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from inference import engine, features
+from inference.decision import ClassNotFound
 from PIL import Image
 from reports.pdf_generator import generate_report
 from sqlalchemy.orm import Session
@@ -188,11 +190,26 @@ async def load_model(
     }
 
 
+@app.get("/api/decision-rules")
+def list_decision_rules():
+    """Decision Rules the active Feature can run, with their param schemas.
+
+    The GUI renders controls generically from `params`, so a new rule needs no
+    frontend code. Empty list when no Feature is active.
+    """
+    return {
+        "active_feature": features.get_active_feature(),
+        "rules": features.current_decision_rules(),
+    }
+
+
 @app.post("/api/infer")
 async def infer(
     sku_name: str = Form(...),
     threshold: float = Form(...),
     customer_name: str = Form(""),
+    decision_rule: str = Form(""),
+    rule_params: str = Form(""),
     image: UploadFile | None = File(None),
     image_path: str | None = Form(None),
     db: Session = Depends(get_db),
@@ -215,8 +232,24 @@ async def infer(
         raise HTTPException(status_code=400, detail="Invalid or unsupported image file.")
 
     try:
-        result = pipeline.infer(image_bytes, threshold)
-    except (IndexError, ValueError):
+        parsed_params = json.loads(rule_params) if rule_params else None
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="rule_params must be valid JSON.")
+    if parsed_params is not None and not isinstance(parsed_params, dict):
+        raise HTTPException(status_code=400, detail="rule_params must be a JSON object.")
+
+    try:
+        result = pipeline.infer(
+            image_bytes, threshold, decision_rule or None, parsed_params
+        )
+    except ClassNotFound as e:
+        # A rule param names a class this model's Class Catalog lacks — a
+        # misconfiguration, and one that would otherwise judge the wrong object.
+        raise HTTPException(status_code=422, detail=str(e))
+    except ValueError as e:
+        # Unknown/incompatible Decision Rule, or an unexpected model output shape.
+        raise HTTPException(status_code=422, detail=str(e))
+    except IndexError:
         raise HTTPException(
             status_code=422,
             detail="Model output format unexpected for the active Feature.",
@@ -230,7 +263,10 @@ async def infer(
         db,
         sku_name=sku_name,
         feature=pipeline.feature,
-        anomaly_score=result.score,
+        score=result.score,
+        decision_rule=result.decision_rule,
+        params=parsed_params,
+        metrics=result.metrics,
         threshold=threshold,
         verdict=result.verdict,
         model_version=pipeline.model_version,
@@ -242,13 +278,22 @@ async def infer(
     def _b64(b: bytes | None) -> str | None:
         return base64.b64encode(b).decode() if b is not None else None
 
+    rounded_score = round(result.score, 4) if result.score is not None else None
     return {
         "feature": pipeline.feature,
+        "decision_rule": result.decision_rule,
         "verdict": result.verdict,
-        "anomaly_score": round(result.score, 4) if result.score is not None else None,
+        "score": rounded_score,
+        "score_label": result.score_label,
+        "metrics": result.metrics,
+        "reason": result.reason,
+        # Deprecated alias, kept so the current frontend keeps working until the
+        # GUI moves to `score`/`score_label`. Remove with that change.
+        "anomaly_score": rounded_score,
         "heatmap_image": _b64(heatmap_bytes),
         "segmentation_image": _b64(segmentation_bytes),
         "annotated_image": _b64(annotated_bytes),
+        "overlay_image": _b64(result.images.get("overlay")),
         "detections": result.detections,
     }
 
@@ -257,9 +302,15 @@ async def infer(
 def get_stats(
     sku_name: str | None = None,
     feature: str | None = None,
+    decision_rule: str | None = None,
     db: Session = Depends(get_db),
 ):
-    return crud.get_stats(db, sku_name=sku_name or None, feature=feature or None)
+    return crud.get_stats(
+        db,
+        sku_name=sku_name or None,
+        feature=feature or None,
+        decision_rule=decision_rule or None,
+    )
 
 
 @app.post("/api/reset")
