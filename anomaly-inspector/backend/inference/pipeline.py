@@ -46,6 +46,8 @@ class InferenceResult:
     - `detections`: optional structured detections.
     - `decision_rule` / `metrics` / `reason`: which rule ran, what it measured,
       and why it decided as it did. Persisted for report traceability.
+    - `stages`: for a Cascade, the ordered per-stage results (each carrying its
+      own image bytes); empty for a single Feature.
     """
 
     verdict: str
@@ -56,6 +58,26 @@ class InferenceResult:
     score_label: str = ""
     metrics: dict = field(default_factory=dict)
     reason: str = ""
+    stages: list["StageResult"] = field(default_factory=list)
+
+
+@dataclass
+class StageResult:
+    """One stage's outcome within a Cascade.
+
+    `evaluated` is False for a stage the cascade short-circuited past: it did not
+    run, so it has no Verdict of its own and must not be read as OK.
+    """
+
+    feature: str
+    decision_rule: str
+    verdict: str  # "ok" | "not_ok"; "skipped" when not evaluated
+    evaluated: bool
+    score: float | None = None
+    score_label: str = ""
+    reason: str = ""
+    image: bytes | None = None
+    detections: list[dict] | None = None
 
 
 class _PipelineBase:

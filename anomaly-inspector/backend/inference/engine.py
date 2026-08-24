@@ -36,9 +36,13 @@ def load_model_from_path(path: str, model_version: str) -> ModelSession:
     return load_model(model_bytes, str(path), model_version)
 
 
-def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
-    global _current_session
+def build_session(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
+    """Build a ModelSession without making it the global current one.
 
+    Single-Feature mode uses `load_model` (which sets the global); a Cascade
+    builds a session per member model and holds them in its own store, so the
+    session-building core is factored out here (see docs/adr/0006).
+    """
     if not filename.endswith(".onnx"):
         raise ValueError(f"Only .onnx files are accepted; got: {filename!r}")
 
@@ -46,7 +50,8 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
     input_name, input_shape = _get_onnx_meta(session) if runtime != "openvino" else _get_openvino_meta(session)
     output_names, map_idx, score_idx = _get_output_plan(session, runtime)
 
-    _current_session = ModelSession(
+    logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
+    return ModelSession(
         session=session,
         runtime=runtime,
         input_name=input_name,
@@ -56,7 +61,18 @@ def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSe
         map_idx=map_idx,
         score_idx=score_idx,
     )
-    logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
+
+
+def build_session_from_path(path: str, model_version: str) -> ModelSession:
+    """Build a session from a filesystem path without setting the global."""
+    with open(path, "rb") as f:
+        return build_session(f.read(), str(path), model_version)
+
+
+def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
+    """Build a session and make it the global current one (single-Feature mode)."""
+    global _current_session
+    _current_session = build_session(model_bytes, filename, model_version)
     return _current_session
 
 

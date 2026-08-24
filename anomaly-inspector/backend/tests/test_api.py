@@ -697,3 +697,130 @@ def test_calibrate_with_no_samples_at_all_is_400(client, segmentation_active):
         },
     )
     assert resp.status_code == 400
+
+
+# ── Cascade ─────────────────────────────────────────────────────────────────
+
+
+def test_cascade_options_lists_features_rules_and_combinators(client):
+    body = client.get("/api/cascade/options").json()
+    feature_names = {f["name"] for f in body["features"]}
+    # Concrete features are cascadable; the cascade meta-feature is not listed.
+    assert "segmentation" in feature_names
+    assert "cascade" not in feature_names
+    assert {c["name"] for c in body["combinators"]} == {"and", "or"}
+    seg = next(f for f in body["features"] if f["name"] == "segmentation")
+    rule_names = {r["name"] for r in seg["rules"]}
+    assert {"concentricity", "expected_classes"} <= rule_names
+    # Class Catalog comes from the sidecar without loading the ONNX.
+    assert "0" in seg["labels"] or seg["labels"] == {}
+
+
+def test_cascade_appears_in_the_feature_catalog(client):
+    names = {f["name"] for f in client.get("/api/status").json()["features"]}
+    assert "cascade" in names
+
+
+class _StubCascade:
+    feature = "cascade"
+    model_version = "cascade[a, b]"
+
+    def infer(self, image_bytes, threshold, rule_name=None, rule_params=None):
+        from inference.pipeline import InferenceResult, StageResult
+        return InferenceResult(
+            verdict="not_ok",
+            score=None,
+            images={},
+            decision_rule="and",
+            reason="stage 2 (segmentation/concentricity) NOK: offset too high",
+            metrics={"combinator": "and", "decisive_stage": 1, "stages": []},
+            stages=[
+                StageResult("anomaly_detection", "anomaly_threshold", "ok", True,
+                            score=0.2, score_label="Anomaly Score",
+                            reason="0.20 < 0.95", image=b"anom"),
+                StageResult("segmentation", "concentricity", "not_ok", True,
+                            score=0.30, score_label="Offset Ratio",
+                            reason="offset 0.30 > 0.06", image=b"seg"),
+            ],
+        )
+
+
+@pytest.fixture
+def cascade_active(client):
+    """Put the app in cascade mode with build_cascade_pipeline stubbed."""
+    from main import features as _feat
+
+    def fake_activate(feature):
+        _feat._active_feature = feature
+        return None
+
+    with patch("main.features.activate", side_effect=fake_activate):
+        client.post("/api/feature", data={"feature": "cascade"})
+    return client
+
+
+def test_cascade_infer_returns_combined_verdict_and_per_stage_breakdown(cascade_active):
+    import json as _json
+
+    spec = {
+        "combinator": "and",
+        "stages": [
+            {"feature": "anomaly_detection", "rule": "anomaly_threshold", "threshold": 0.95},
+            {"feature": "segmentation", "rule": "concentricity", "threshold": 0.5},
+        ],
+    }
+    with patch("main._build_cascade_or_400", return_value=_StubCascade()):
+        body = cascade_active.post(
+            "/api/infer",
+            data={"sku_name": "SKU-C", "threshold": "0.5", "cascade_spec": _json.dumps(spec)},
+            files={"image": ("t.png", _make_png_bytes(), "image/png")},
+        ).json()
+
+    assert body["feature"] == "cascade"
+    assert body["verdict"] == "not_ok"
+    assert body["decision_rule"] == "and"
+    assert len(body["stages"]) == 2
+    assert body["stages"][0]["feature"] == "anomaly_detection"
+    assert body["stages"][0]["verdict"] == "ok"
+    assert body["stages"][1]["verdict"] == "not_ok"
+    assert body["stages"][1]["image"] is not None
+    assert "segmentation" in body["reason"]
+
+
+def test_cascade_infer_records_feature_cascade_for_stats(cascade_active):
+    import json as _json
+
+    spec = {"combinator": "and", "stages": [{"feature": "segmentation", "rule": "concentricity"}]}
+    with patch("main._build_cascade_or_400", return_value=_StubCascade()):
+        cascade_active.post(
+            "/api/infer",
+            data={"sku_name": "SKU-C", "threshold": "0.5", "cascade_spec": _json.dumps(spec)},
+            files={"image": ("t.png", _make_png_bytes(), "image/png")},
+        )
+    assert cascade_active.get("/api/stats?feature=cascade").json()["total"] == 1
+
+
+def test_cascade_infer_without_spec_is_400(cascade_active):
+    resp = cascade_active.post(
+        "/api/infer",
+        data={"sku_name": "SKU-C", "threshold": "0.5"},
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 400
+    assert "cascade_spec" in resp.json()["detail"]
+
+
+def test_cascade_infer_surfaces_a_config_error(cascade_active):
+    import json as _json
+
+    spec = {"combinator": "and", "stages": [{"feature": "segmentation", "rule": "anomaly_threshold"}]}
+    # Real build path: incompatible rule -> 422, not a silent NOK.
+    with patch("main.features.build_cascade_pipeline",
+               side_effect=ValueError("rule needs anomaly_map")):
+        resp = cascade_active.post(
+            "/api/infer",
+            data={"sku_name": "SKU-C", "threshold": "0.5", "cascade_spec": _json.dumps(spec)},
+            files={"image": ("t.png", _make_png_bytes(), "image/png")},
+        )
+    assert resp.status_code == 422
+    assert "Invalid cascade" in resp.json()["detail"]

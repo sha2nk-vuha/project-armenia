@@ -77,3 +77,47 @@ def test_a_separating_threshold_still_exists(pipeline):
         f">= best NOK {best_nok:.4f}. Per-SKU calibration (nominal_offset) is "
         "then required."
     )
+
+
+def test_cascade_anomaly_and_segmentation_over_the_samples():
+    """The headline case: anomaly AND segmentation as a cascade, over the real
+    models. Segmentation's concentricity verdict must drive the cascade when
+    anomaly passes, and any anomaly NOK must force the cascade NOK."""
+    import json as _json
+
+    from config import ANOMALY_FEATURE, FEATURES, SEGMENTATION_FEATURE
+    from inference import features
+
+    for feat in (ANOMALY_FEATURE, SEGMENTATION_FEATURE):
+        if not FEATURES[feat]["model_path"].exists():
+            pytest.skip(f"{feat} model not present")
+    if not _SAMPLES.is_dir():
+        pytest.skip("sample caps not present")
+
+    features.reset()
+    spec = {
+        "combinator": "and",
+        "short_circuit": False,  # evaluate both stages so we can inspect each
+        "stages": [
+            {"feature": ANOMALY_FEATURE, "rule": "anomaly_threshold", "threshold": 0.95},
+            {"feature": SEGMENTATION_FEATURE, "rule": "concentricity", "threshold": 0.5,
+             "params": {"target_center_method": "outer_circle_fit", "max_offset_ratio": 0.06}},
+        ],
+    }
+    pipeline = features.build_cascade_pipeline(_json.loads(_json.dumps(spec)))
+
+    from pathlib import Path
+    for path, seg_expected in _labelled():
+        result = pipeline.infer(Path(path).read_bytes(), 0.5)
+        assert len(result.stages) == 2
+        anomaly_stage, seg_stage = result.stages
+        assert anomaly_stage.feature == ANOMALY_FEATURE
+        assert seg_stage.feature == SEGMENTATION_FEATURE
+        # Cascade verdict is the AND of the two stages.
+        combined = "ok" if anomaly_stage.verdict == "ok" and seg_stage.verdict == "ok" else "not_ok"
+        assert result.verdict == combined
+        # When anomaly passes, segmentation's concentricity drives the result.
+        if anomaly_stage.verdict == "ok":
+            assert result.verdict == seg_stage.verdict == seg_expected
+
+    features.reset()

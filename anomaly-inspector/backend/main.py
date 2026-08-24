@@ -8,6 +8,7 @@ from pathlib import Path
 
 from config import (
     APP_VERSION,
+    CASCADE_FEATURE,
     DATA_ROOT,
     DEFAULT_FEATURE,
     FEATURES,
@@ -157,6 +158,9 @@ def set_feature(feature: str = Form(...)):
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=f"Invalid model sidecar: {e}")
+    # A cascade has no single model of its own; its members load per request.
+    if sess is None:
+        return {"status": "activated", "active_feature": feature, "composite": True}
     return {
         "status": "activated",
         "active_feature": feature,
@@ -359,6 +363,40 @@ async def calibrate(
     }
 
 
+@app.get("/api/cascade/options")
+def cascade_options():
+    """Everything the cascade stage builder needs, without loading any ONNX.
+
+    Per cascadable Feature: its compatible Decision Rules (schema + sidecar
+    defaults) and its Class Catalog; plus the available Combinators.
+    """
+    return features.cascade_options()
+
+
+def _build_cascade_or_400(spec: dict, sku_name: str, db: Session):
+    """Assemble a CascadePipeline, injecting each stage's SKU calibration.
+
+    Layering per stage matches single-Feature mode: sidecar < SKU calibration <
+    request params. Configuration problems (bad spec, unknown feature/rule,
+    incompatible rule, missing model) surface as 4xx rather than silent NOKs.
+    """
+    stages = spec.get("stages")
+    if not isinstance(stages, list):
+        raise HTTPException(status_code=400, detail="cascade spec needs a 'stages' list.")
+    for stage in stages:
+        feature, rule = stage.get("feature"), stage.get("rule")
+        if feature and rule:
+            taught = crud.calibration_params(db, sku_name, feature, rule)
+            if taught:
+                stage["params"] = {**taught, **(stage.get("params") or {})}
+    try:
+        return features.build_cascade_pipeline(spec)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid cascade: {e}")
+
+
 @app.post("/api/infer")
 async def infer(
     sku_name: str = Form(...),
@@ -366,13 +404,12 @@ async def infer(
     customer_name: str = Form(""),
     decision_rule: str = Form(""),
     rule_params: str = Form(""),
+    cascade_spec: str = Form(""),
     image: UploadFile | None = File(None),
     image_path: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    pipeline = features.current_pipeline()
-    if pipeline is None:
-        raise HTTPException(status_code=400, detail="No model loaded. Load a model first.")
+    is_cascade = features.get_active_feature() == CASCADE_FEATURE
 
     # Image source: an uploaded file, or a path into the on-disk dataset.
     if image is not None:
@@ -387,38 +424,58 @@ async def infer(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid or unsupported image file.")
 
-    try:
-        parsed_params = json.loads(rule_params) if rule_params else None
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="rule_params must be valid JSON.")
-    if parsed_params is not None and not isinstance(parsed_params, dict):
-        raise HTTPException(status_code=400, detail="rule_params must be a JSON object.")
+    # Acquire the pipeline and the params to record.
+    if is_cascade:
+        if not cascade_spec:
+            raise HTTPException(status_code=400, detail="Cascade mode needs a cascade_spec.")
+        try:
+            spec = json.loads(cascade_spec)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="cascade_spec must be valid JSON.")
+        if not isinstance(spec, dict):
+            raise HTTPException(status_code=400, detail="cascade_spec must be a JSON object.")
+        pipeline = _build_cascade_or_400(spec, sku_name, db)
+        record_params = spec
+    else:
+        pipeline = features.current_pipeline()
+        if pipeline is None:
+            raise HTTPException(status_code=400, detail="No model loaded. Load a model first.")
+        try:
+            parsed_params = json.loads(rule_params) if rule_params else None
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="rule_params must be valid JSON.")
+        if parsed_params is not None and not isinstance(parsed_params, dict):
+            raise HTTPException(status_code=400, detail="rule_params must be a JSON object.")
+        # Layering: sidecar defaults < SKU calibration < request. The GUI normally
+        # sends the calibrated value already; this keeps a bare API call correct too.
+        try:
+            rule_name = pipeline._resolve_rule(decision_rule or None).name
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        taught = crud.calibration_params(db, sku_name, pipeline.feature, rule_name)
+        record_params = {**taught, **(parsed_params or {})} or None
 
-    # Layering: sidecar defaults < SKU calibration < request. The GUI normally
-    # sends the calibrated value already; this keeps a bare API call correct too.
     try:
-        rule_name = pipeline._resolve_rule(decision_rule or None).name
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    taught = crud.calibration_params(db, sku_name, pipeline.feature, rule_name)
-    effective_params = {**taught, **(parsed_params or {})} or None
-
-    try:
-        result = pipeline.infer(
-            image_bytes, threshold, decision_rule or None, effective_params
-        )
+        if is_cascade:
+            result = pipeline.infer(image_bytes, threshold)
+        else:
+            result = pipeline.infer(
+                image_bytes, threshold, decision_rule or None, record_params
+            )
     except ClassNotFound as e:
-        # A rule param names a class this model's Class Catalog lacks — a
+        # A rule param names a class the model's Class Catalog lacks — a
         # misconfiguration, and one that would otherwise judge the wrong object.
         raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
-        # Unknown/incompatible Decision Rule, or an unexpected model output shape.
         raise HTTPException(status_code=422, detail=str(e))
     except IndexError:
         raise HTTPException(
             status_code=422,
             detail="Model output format unexpected for the active Feature.",
         )
+
+    def _b64(b: bytes | None) -> str | None:
+        return base64.b64encode(b).decode() if b is not None else None
 
     heatmap_bytes = result.images.get("heatmap")
     segmentation_bytes = result.images.get("segmentation")
@@ -430,7 +487,7 @@ async def infer(
         feature=pipeline.feature,
         score=result.score,
         decision_rule=result.decision_rule,
-        params=effective_params,
+        params=record_params,
         metrics=result.metrics,
         threshold=threshold,
         verdict=result.verdict,
@@ -439,9 +496,6 @@ async def infer(
         heatmap_image=heatmap_bytes,
         segmentation_image=segmentation_bytes,
     )
-
-    def _b64(b: bytes | None) -> str | None:
-        return base64.b64encode(b).decode() if b is not None else None
 
     rounded_score = round(result.score, 4) if result.score is not None else None
     return {
@@ -457,6 +511,21 @@ async def infer(
         "annotated_image": _b64(annotated_bytes),
         "overlay_image": _b64(result.images.get("overlay")),
         "detections": result.detections,
+        # Cascade: the ordered per-stage breakdown, each with its own image.
+        "stages": [
+            {
+                "feature": st.feature,
+                "decision_rule": st.decision_rule,
+                "verdict": st.verdict,
+                "evaluated": st.evaluated,
+                "score": round(st.score, 4) if st.score is not None else None,
+                "score_label": st.score_label,
+                "reason": st.reason,
+                "image": _b64(st.image),
+                "detections": st.detections,
+            }
+            for st in result.stages
+        ],
     }
 
 

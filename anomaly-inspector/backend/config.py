@@ -21,6 +21,7 @@ DEFAULT_MODEL_VERSION = os.environ.get("DEFAULT_MODEL_VERSION", "dinomaly_s_mvte
 ANOMALY_FEATURE = "anomaly_detection"
 PRESENCE_FEATURE = "presence_absence"
 SEGMENTATION_FEATURE = "segmentation"
+CASCADE_FEATURE = "cascade"
 DEFAULT_FEATURE = os.environ.get("DEFAULT_FEATURE", ANOMALY_FEATURE)
 
 # Per-Feature default model. `DEFAULT_MODEL_PATH`/`_VERSION` stay as the Anomaly
@@ -56,6 +57,14 @@ FEATURES: dict[str, dict] = {
         "model_version": os.environ.get(
             "SEGMENTATION_MODEL_VERSION", "rfdetr-seg-nano-v0.0.1"
         ),
+    },
+    # Cascade is a composite Feature: it runs several of the above as stages and
+    # combines their Verdicts. It has no model of its own (see docs/adr/0006),
+    # so it carries no model_path and is special-cased in activation.
+    CASCADE_FEATURE: {
+        "label": "Cascade",
+        "threshold_label": "Per-stage",
+        "composite": True,
     },
 }
 
