@@ -500,7 +500,7 @@ export default function App() {
       </header>
 
       {/* Main layout — Setup | Gallery | Results */}
-      <main className="flex flex-1 overflow-hidden">
+      <main className="flex flex-1 overflow-hidden min-h-0">
         {/* Left panel — Setup */}
         <aside
           style={{ width: setupWidth }}
@@ -588,7 +588,7 @@ export default function App() {
         {/* Right panel — Results */}
         <section
           style={{ width: resultsWidth }}
-          className="shrink-0 flex flex-col overflow-y-auto bg-white p-4 gap-4"
+          className="shrink-0 overflow-y-auto bg-white p-4 space-y-4"
         >
           <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
             Result
