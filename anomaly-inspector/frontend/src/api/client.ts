@@ -26,11 +26,38 @@ export interface ParamSpec {
   help: string | null;
 }
 
+// Declared by rules that support a per-SKU baseline taught from known-good
+// samples. Null for rules with nothing to calibrate.
+export interface CalibrationSpec {
+  param: string;
+  metric: string;
+  label: string;
+}
+
 export interface DecisionRuleInfo {
   name: string;
   label: string;
   consumes: string[];
   params: ParamSpec[];
+  calibration: CalibrationSpec | null;
+  // Schema defaults with the model sidecar layered on. Seed controls from these,
+  // not from ParamSpec.default, or the sidecar's configuration is discarded.
+  defaults: RuleParams;
+}
+
+export interface CalibrationState {
+  sku_name: string;
+  decision_rule: string;
+  calibrated: boolean;
+  params: RuleParams;
+  sample_count?: number;
+  spread?: number | null;
+  updated_at?: string;
+}
+
+export interface CalibrateResult extends CalibrationState {
+  skipped: string[];
+  measured: number[];
 }
 
 export interface DecisionRulesResponse {
@@ -160,6 +187,38 @@ export const api = {
   async getDecisionRules(): Promise<DecisionRulesResponse> {
     const res = await fetch("/api/decision-rules");
     return handleResponse<DecisionRulesResponse>(res);
+  },
+
+  async getCalibration(sku: string, decisionRule: string): Promise<CalibrationState> {
+    const res = await fetch(
+      `/api/skus/${encodeURIComponent(sku)}/calibration?decision_rule=${encodeURIComponent(decisionRule)}`
+    );
+    return handleResponse<CalibrationState>(res);
+  },
+
+  async calibrate(
+    skuName: string,
+    decisionRule: string,
+    imagePaths: string[],
+    threshold: number,
+    ruleParams: RuleParams
+  ): Promise<CalibrateResult> {
+    const form = new FormData();
+    form.append("sku_name", skuName);
+    form.append("decision_rule", decisionRule);
+    form.append("image_paths", JSON.stringify(imagePaths));
+    form.append("threshold", String(threshold));
+    form.append("rule_params", JSON.stringify(ruleParams));
+    const res = await fetch("/api/calibrate", { method: "POST", body: form });
+    return handleResponse<CalibrateResult>(res);
+  },
+
+  async clearCalibration(sku: string, decisionRule: string): Promise<{ cleared: boolean }> {
+    const res = await fetch(
+      `/api/skus/${encodeURIComponent(sku)}/calibration?decision_rule=${encodeURIComponent(decisionRule)}`,
+      { method: "DELETE" }
+    );
+    return handleResponse<{ cleared: boolean }>(res);
   },
 
   async getSkus(): Promise<string[]> {

@@ -1,10 +1,10 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .models import Inspection
+from .models import Inspection, SkuCalibration
 
 
 def create_inspection(
@@ -101,3 +101,65 @@ def delete_all_inspections(db: Session) -> int:
     deleted = db.query(Inspection).delete()
     db.commit()
     return deleted
+
+
+# ── Per-SKU calibration ─────────────────────────────────────────────────────
+
+
+def get_calibration(
+    db: Session, sku_name: str, feature: str, decision_rule: str
+) -> SkuCalibration | None:
+    return (
+        db.query(SkuCalibration)
+        .filter(
+            SkuCalibration.sku_name == sku_name,
+            SkuCalibration.feature == feature,
+            SkuCalibration.decision_rule == decision_rule,
+        )
+        .one_or_none()
+    )
+
+
+def calibration_params(
+    db: Session, sku_name: str, feature: str, decision_rule: str
+) -> dict:
+    """The taught params for a SKU, or empty when it has never been taught."""
+    record = get_calibration(db, sku_name, feature, decision_rule)
+    return json.loads(record.params) if record else {}
+
+
+def upsert_calibration(
+    db: Session,
+    sku_name: str,
+    feature: str,
+    decision_rule: str,
+    params: dict,
+    sample_count: int,
+    spread: float | None = None,
+) -> SkuCalibration:
+    """Store (or replace) a SKU's taught baseline. Teaching again overwrites."""
+    record = get_calibration(db, sku_name, feature, decision_rule)
+    if record is None:
+        record = SkuCalibration(
+            sku_name=sku_name, feature=feature, decision_rule=decision_rule
+        )
+        db.add(record)
+    record.params = json.dumps(params)
+    record.sample_count = sample_count
+    record.spread = spread
+    record.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def delete_calibration(
+    db: Session, sku_name: str, feature: str, decision_rule: str
+) -> bool:
+    """Forget a SKU's baseline; the rule falls back to its sidecar defaults."""
+    record = get_calibration(db, sku_name, feature, decision_rule)
+    if record is None:
+        return False
+    db.delete(record)
+    db.commit()
+    return True

@@ -35,11 +35,21 @@ def compatible_with(kinds: frozenset[str]) -> list[DecisionRule]:
 
 def describe(rule: DecisionRule) -> dict:
     """UI metadata for one rule: identity plus its parameter schema."""
+    calibration = getattr(rule, "calibration", None)
     return {
         "name": rule.name,
         "label": rule.label,
         "consumes": sorted(rule.consumes),
         "params": [p.as_dict() for p in rule.params],
+        "calibration": (
+            {
+                "param": calibration.param,
+                "metric": calibration.metric,
+                "label": calibration.label,
+            }
+            if calibration
+            else None
+        ),
     }
 
 

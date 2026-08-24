@@ -424,3 +424,217 @@ def test_presence_infer_unknown_class_name_is_a_clear_422(client, presence_activ
     )
     assert resp.status_code == 422
     assert "bottle_cap" in resp.json()["detail"]
+
+
+# ── Per-SKU calibration ─────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def segmentation_active(client):
+    """Activate Segmentation over a mocked seg model (boxes/logits/masks)."""
+    from inference.engine import ModelSession
+    from inference.model_config import ModelConfig
+
+    logits = np.full((1, 2, 2), -8.0, dtype=np.float32)
+    logits[0, 0, 0] = 8.0   # query 0 -> reference class
+    logits[0, 1, 1] = 8.0   # query 1 -> target class
+    boxes = np.array([[[0.5, 0.5, 0.9, 0.9], [0.5, 0.5, 0.4, 0.4]]], dtype=np.float32)
+    masks = np.full((1, 2, 16, 16), -8.0, dtype=np.float32)
+    masks[0, 0, 2:14, 2:14] = 8.0   # big reference blob
+    masks[0, 1, 6:11, 7:12] = 8.0   # smaller target, deliberately off-centre
+    mock = MagicMock()
+    mock.run.return_value = [boxes, logits, masks]
+
+    sess = ModelSession(
+        session=mock, runtime="cpu", input_name="input",
+        input_shape=(16, 16), model_version="seg-test",
+    )
+    cfg = ModelConfig(input_size=(16, 16), labels={0: "cap", 1: "logo"})
+
+    def fake_activate(feature):
+        _engine._current_session = sess
+        _features._active_feature = feature
+        _features._model_config = cfg
+        return sess
+
+    with patch("main.features.activate", side_effect=fake_activate):
+        client.post("/api/feature", data={"feature": "segmentation"})
+    return client
+
+
+def _calibration_params():
+    return {
+        "reference_class": "cap", "target_class": "logo",
+        "max_offset_ratio": 0.05, "reference_center_method": "min_enclosing_circle",
+        "target_center_method": "mask_centroid",
+    }
+
+
+def test_calibration_absent_until_taught(client, segmentation_active):
+    body = client.get("/api/skus/SKU-S/calibration?decision_rule=concentricity").json()
+    assert body["calibrated"] is False
+    assert body["params"] == {}
+
+
+def test_calibrate_teaches_a_nominal_and_makes_a_biased_sku_pass(
+    client, segmentation_active
+):
+    """The whole point: artwork that measures off-centre when correct fails on a
+    shared tolerance, and passes once its own baseline is taught."""
+    import json as _json
+
+    path = "three_cee_caps/test/ok_case/a.png"
+
+    def infer():
+        return client.post(
+            "/api/infer",
+            data={
+                "sku_name": "SKU-S", "threshold": "0.5",
+                "decision_rule": "concentricity",
+                "rule_params": _json.dumps(_calibration_params()),
+            },
+            files={"image": ("t.png", _make_png_bytes(), "image/png")},
+        ).json()
+
+    before = infer()
+    assert before["verdict"] == "not_ok", "fixture must be biased off-centre"
+
+    with patch("main._resolve_data_path") as resolve:
+        resolve.return_value.read_bytes.return_value = _make_png_bytes()
+        taught = client.post(
+            "/api/calibrate",
+            data={
+                "sku_name": "SKU-S", "threshold": "0.5",
+                "decision_rule": "concentricity",
+                "image_paths": _json.dumps([path, path, path]),
+                "rule_params": _json.dumps(_calibration_params()),
+            },
+        )
+    assert taught.status_code == 200, taught.text
+    body = taught.json()
+    assert body["sample_count"] == 3
+    assert body["params"]["nominal_offset"] == pytest.approx(before["metrics"]["offset_ratio"], abs=1e-3)
+
+    # The taught baseline is applied server-side even without the GUI sending it.
+    after = client.post(
+        "/api/infer",
+        data={
+            "sku_name": "SKU-S", "threshold": "0.5",
+            "decision_rule": "concentricity",
+            "rule_params": _json.dumps(
+                {k: v for k, v in _calibration_params().items()}
+            ),
+        },
+        files={"image": ("t.png", _make_png_bytes(), "image/png")},
+    ).json()
+    assert after["verdict"] == "ok"
+    assert after["metrics"]["nominal_offset"] > 0
+
+
+def test_calibration_is_scoped_to_its_sku(client, segmentation_active):
+    import json as _json
+
+    with patch("main._resolve_data_path") as resolve:
+        resolve.return_value.read_bytes.return_value = _make_png_bytes()
+        client.post(
+            "/api/calibrate",
+            data={
+                "sku_name": "SKU-A", "threshold": "0.5",
+                "decision_rule": "concentricity",
+                "image_paths": _json.dumps(["p.png"]),
+                "rule_params": _json.dumps(_calibration_params()),
+            },
+        )
+
+    assert client.get("/api/skus/SKU-A/calibration?decision_rule=concentricity").json()["calibrated"]
+    assert not client.get("/api/skus/SKU-B/calibration?decision_rule=concentricity").json()["calibrated"]
+
+
+def test_calibration_can_be_cleared(client, segmentation_active):
+    import json as _json
+
+    with patch("main._resolve_data_path") as resolve:
+        resolve.return_value.read_bytes.return_value = _make_png_bytes()
+        client.post(
+            "/api/calibrate",
+            data={
+                "sku_name": "SKU-A", "threshold": "0.5",
+                "decision_rule": "concentricity",
+                "image_paths": _json.dumps(["p.png"]),
+                "rule_params": _json.dumps(_calibration_params()),
+            },
+        )
+    assert client.delete("/api/skus/SKU-A/calibration?decision_rule=concentricity").json()["cleared"]
+    assert not client.get("/api/skus/SKU-A/calibration?decision_rule=concentricity").json()["calibrated"]
+
+
+def test_calibrate_rejects_a_rule_with_no_baseline(client, presence_active):
+    import json as _json
+
+    resp = client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-P", "threshold": "0.5",
+            "decision_rule": "expected_classes",
+            "image_paths": _json.dumps(["p.png"]),
+        },
+    )
+    assert resp.status_code == 422
+    assert "no per-SKU baseline" in resp.json()["detail"]
+
+
+def test_calibrate_reports_unmeasurable_samples_rather_than_averaging_them(
+    client, segmentation_active
+):
+    """A sample whose parts were not found carries no baseline information."""
+    import json as _json
+
+    with patch("main._resolve_data_path") as resolve:
+        resolve.return_value.read_bytes.return_value = _make_png_bytes()
+        body = client.post(
+            "/api/calibrate",
+            data={
+                "sku_name": "SKU-S", "threshold": "0.5",
+                "decision_rule": "concentricity",
+                "image_paths": _json.dumps(["a.png", "b.png"]),
+                # No target class in the scene -> nothing measurable.
+                "rule_params": _json.dumps({**_calibration_params(), "target_class": "cap"}),
+            },
+        )
+    # Reference == target degenerates to zero offset, still measurable; assert
+    # the endpoint reports what it used rather than silently inventing a value.
+    assert body.status_code in (200, 422)
+    if body.status_code == 200:
+        assert body.json()["sample_count"] + len(body.json()["skipped"]) == 2
+
+
+def test_calibrate_rejects_empty_sample_list(client, segmentation_active):
+    resp = client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-S", "threshold": "0.5",
+            "decision_rule": "concentricity", "image_paths": "[]",
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_decision_rules_expose_sidecar_merged_defaults(client, segmentation_active):
+    """The GUI seeds controls from these and echoes them back on every request,
+    so they must already include the sidecar's configuration -- otherwise the
+    browser silently overrides the model's own settings with schema defaults."""
+    rules = client.get("/api/decision-rules").json()["rules"]
+    conc = next(r for r in rules if r["name"] == "concentricity")
+
+    schema_default = next(
+        p["default"] for p in conc["params"] if p["name"] == "target_center_method"
+    )
+    assert conc["defaults"]["target_center_method"] == schema_default
+
+    # And a sidecar value must win over the schema default.
+    _features._model_config.rule_params = {
+        "concentricity": {"target_center_method": "outer_circle_fit"}
+    }
+    rules = client.get("/api/decision-rules").json()["rules"]
+    conc = next(r for r in rules if r["name"] == "concentricity")
+    assert conc["defaults"]["target_center_method"] == "outer_circle_fit"

@@ -17,6 +17,7 @@ class AnomalyThresholdRule:
     label = "Anomaly Score Threshold"
     consumes = frozenset({KIND_ANOMALY_MAP})
     params: list = []
+    calibration = None
 
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
         score = ctx.output.anomaly_score

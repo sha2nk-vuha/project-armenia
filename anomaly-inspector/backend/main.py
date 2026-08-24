@@ -210,6 +210,143 @@ def list_decision_rules():
     }
 
 
+def _active_rule_or_400(decision_rule: str):
+    """Resolve the rule to calibrate, defaulting to the active pipeline's."""
+    pipeline = features.current_pipeline()
+    if pipeline is None:
+        raise HTTPException(status_code=400, detail="No model loaded. Load a model first.")
+    try:
+        return pipeline, pipeline._resolve_rule(decision_rule or None)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/skus/{sku}/calibration")
+def get_sku_calibration(
+    sku: str,
+    decision_rule: str = "",
+    db: Session = Depends(get_db),
+):
+    """A SKU's taught baseline for a Decision Rule, if it has one."""
+    pipeline, rule = _active_rule_or_400(decision_rule)
+    record = crud.get_calibration(db, sku, pipeline.feature, rule.name)
+    if record is None:
+        return {"sku_name": sku, "decision_rule": rule.name, "calibrated": False, "params": {}}
+    return {
+        "sku_name": sku,
+        "decision_rule": rule.name,
+        "calibrated": True,
+        "params": json.loads(record.params),
+        "sample_count": record.sample_count,
+        "spread": record.spread,
+        "updated_at": record.updated_at.isoformat(),
+    }
+
+
+@app.delete("/api/skus/{sku}/calibration")
+def clear_sku_calibration(
+    sku: str,
+    decision_rule: str = "",
+    db: Session = Depends(get_db),
+):
+    """Forget a baseline; the rule falls back to its sidecar defaults."""
+    pipeline, rule = _active_rule_or_400(decision_rule)
+    return {"cleared": crud.delete_calibration(db, sku, pipeline.feature, rule.name)}
+
+
+@app.post("/api/calibrate")
+async def calibrate(
+    sku_name: str = Form(...),
+    image_paths: str = Form(...),
+    threshold: float = Form(...),
+    decision_rule: str = Form(""),
+    rule_params: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Teach a SKU's baseline from images known to be good.
+
+    Artwork that is not symmetric about its own centre measures non-zero even
+    when correctly placed, by an amount that differs per SKU. Teaching the
+    median of that measurement lets one tolerance serve every SKU.
+
+    The median is used rather than the mean so a single mislabelled sample
+    cannot drag the baseline, and the spread is recorded because a tolerance
+    below it would be measuring sample noise.
+    """
+    pipeline, rule = _active_rule_or_400(decision_rule)
+    spec = getattr(rule, "calibration", None)
+    if spec is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Decision Rule {rule.name!r} has no per-SKU baseline to teach.",
+        )
+
+    try:
+        paths = json.loads(image_paths)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="image_paths must be valid JSON.")
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(status_code=400, detail="Provide a non-empty list of image_paths.")
+
+    try:
+        overrides = json.loads(rule_params) if rule_params else None
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="rule_params must be valid JSON.")
+
+    measured: list[float] = []
+    skipped: list[str] = []
+    for rel in paths:
+        image_bytes = _resolve_data_path(rel).read_bytes()
+        try:
+            result = pipeline.infer(image_bytes, threshold, rule.name, overrides)
+        except ClassNotFound as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except (ValueError, IndexError):
+            skipped.append(rel)
+            continue
+        value = result.metrics.get(spec.metric)
+        # A sample the rule could not measure (a part it failed to find) carries
+        # no information about the baseline, so it is reported, not averaged in.
+        if isinstance(value, (int, float)):
+            measured.append(float(value))
+        else:
+            skipped.append(rel)
+
+    if not measured:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"None of the {len(paths)} images produced a {spec.metric!r} "
+                "measurement; check that the expected parts are detected."
+            ),
+        )
+
+    values = sorted(measured)
+    median = values[len(values) // 2] if len(values) % 2 else (
+        values[len(values) // 2 - 1] + values[len(values) // 2]
+    ) / 2
+    spread = max(values) - min(values)
+
+    record = crud.upsert_calibration(
+        db,
+        sku_name=sku_name,
+        feature=pipeline.feature,
+        decision_rule=rule.name,
+        params={spec.param: round(median, 4)},
+        sample_count=len(measured),
+        spread=round(spread, 4),
+    )
+    return {
+        "sku_name": sku_name,
+        "decision_rule": rule.name,
+        "params": json.loads(record.params),
+        "sample_count": record.sample_count,
+        "spread": record.spread,
+        "skipped": skipped,
+        "measured": [round(v, 4) for v in values],
+    }
+
+
 @app.post("/api/infer")
 async def infer(
     sku_name: str = Form(...),
@@ -245,9 +382,18 @@ async def infer(
     if parsed_params is not None and not isinstance(parsed_params, dict):
         raise HTTPException(status_code=400, detail="rule_params must be a JSON object.")
 
+    # Layering: sidecar defaults < SKU calibration < request. The GUI normally
+    # sends the calibrated value already; this keeps a bare API call correct too.
+    try:
+        rule_name = pipeline._resolve_rule(decision_rule or None).name
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    taught = crud.calibration_params(db, sku_name, pipeline.feature, rule_name)
+    effective_params = {**taught, **(parsed_params or {})} or None
+
     try:
         result = pipeline.infer(
-            image_bytes, threshold, decision_rule or None, parsed_params
+            image_bytes, threshold, decision_rule or None, effective_params
         )
     except ClassNotFound as e:
         # A rule param names a class this model's Class Catalog lacks — a
@@ -272,7 +418,7 @@ async def infer(
         feature=pipeline.feature,
         score=result.score,
         decision_rule=result.decision_rule,
-        params=parsed_params,
+        params=effective_params,
         metrics=result.metrics,
         threshold=threshold,
         verdict=result.verdict,

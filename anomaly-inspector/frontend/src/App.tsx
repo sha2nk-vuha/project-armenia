@@ -8,6 +8,7 @@ import {
   type FeatureInfo,
   type DecisionRuleInfo,
   type RuleParams,
+  type CalibrationState,
 } from "./api/client";
 import { SettingsModal } from "./components/SettingsModal";
 import { ReportModal } from "./components/ReportModal";
@@ -24,6 +25,17 @@ const MIN_GALLERY_WIDTH = 200;
 
 const clamp = (v: number, min: number, max: number) =>
   Math.min(Math.max(v, min), Math.max(min, max));
+
+// Controls are seeded from the backend's effective defaults (schema + model
+// sidecar). The browser echoes these back on every inference, so seeding from
+// the bare schema would silently discard the sidecar's configuration.
+function seedParams(rule: DecisionRuleInfo | null): RuleParams {
+  if (!rule) return {};
+  return {
+    ...Object.fromEntries(rule.params.map((p) => [p.name, p.default])),
+    ...(rule.defaults ?? {}),
+  };
+}
 
 export default function App() {
   const [modelStatus, setModelStatus] = useState<LoadModelResponse | null>(null);
@@ -45,6 +57,11 @@ export default function App() {
   const [classLabels, setClassLabels] = useState<Record<string, string>>({});
   const [selectedRule, setSelectedRule] = useState<string | null>(null);
   const [ruleParams, setRuleParams] = useState<RuleParams>({});
+  // Per-SKU baseline. Fetched into ruleParams so the browser stays the single
+  // source of truth for what an inference runs with.
+  const [calibration, setCalibration] = useState<CalibrationState | null>(null);
+  const [calibrationGroup, setCalibrationGroup] = useState<string | null>(null);
+  const [calibrating, setCalibrating] = useState(false);
 
   const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
@@ -63,6 +80,9 @@ export default function App() {
 
   const modelLoaded = !!modelStatus;
   const activeRule = decisionRules.find((r) => r.name === selectedRule) ?? null;
+  // Image groups are the gallery's categories (dataset subfolders), which is how
+  // an operator already separates known-good caps from the rest.
+  const calibrationGroups = Array.from(new Set(images.map((i) => i.category))).sort();
   const activeFeatureInfo = features.find((f) => f.name === activeFeature) ?? null;
   const thresholdLabel = activeFeatureInfo?.threshold_label ?? "Threshold";
   const resultFeature = inferResult?.feature ?? activeFeature ?? "anomaly_detection";
@@ -113,9 +133,7 @@ export default function App() {
       const preferred =
         res.rules.find((r) => r.name === res.default_rule) ?? res.rules[0] ?? null;
       setSelectedRule(preferred?.name ?? null);
-      setRuleParams(
-        Object.fromEntries((preferred?.params ?? []).map((p) => [p.name, p.default]))
-      );
+      setRuleParams(seedParams(preferred));
     } catch {
       setDecisionRules([]);
       setSelectedRule(null);
@@ -126,6 +144,72 @@ export default function App() {
   useEffect(() => {
     if (modelLoaded) void loadDecisionRules();
   }, [modelLoaded, activeFeature, loadDecisionRules]);
+
+  // A taught baseline belongs to (SKU, rule), so refetch when either changes and
+  // fold it over the schema/sidecar defaults.
+  const loadCalibration = useCallback(async () => {
+    if (!selectedSku || !selectedRule) {
+      setCalibration(null);
+      return;
+    }
+    try {
+      const state = await api.getCalibration(selectedSku, selectedRule);
+      setCalibration(state);
+      if (state.calibrated) {
+        setRuleParams((prev) => ({ ...prev, ...state.params }));
+      }
+    } catch {
+      setCalibration(null);
+    }
+  }, [selectedSku, selectedRule]);
+
+  useEffect(() => {
+    void loadCalibration();
+  }, [loadCalibration]);
+
+  const handleCalibrate = useCallback(async () => {
+    if (!selectedSku || !selectedRule || !calibrationGroup) return;
+    const paths = images.filter((i) => i.category === calibrationGroup).map((i) => i.path);
+    if (paths.length === 0) return;
+    setCalibrating(true);
+    setInferError(null);
+    try {
+      const result = await api.calibrate(
+        selectedSku, selectedRule, paths, threshold, ruleParams
+      );
+      setCalibration({ ...result, calibrated: true });
+      setRuleParams((prev) => ({ ...prev, ...result.params }));
+      if (result.skipped.length > 0) {
+        setInferError(
+          `Calibrated on ${result.sample_count} of ${paths.length} images; ` +
+            `${result.skipped.length} could not be measured.`
+        );
+      }
+    } catch (e) {
+      setInferError(e instanceof Error ? e.message : "Calibration failed.");
+    } finally {
+      setCalibrating(false);
+    }
+  }, [selectedSku, selectedRule, calibrationGroup, images, threshold, ruleParams]);
+
+  const handleClearCalibration = useCallback(async () => {
+    if (!selectedSku || !selectedRule) return;
+    try {
+      await api.clearCalibration(selectedSku, selectedRule);
+      const rule = decisionRules.find((r) => r.name === selectedRule);
+      const param = rule?.calibration?.param;
+      if (param) {
+        const fallback = seedParams(rule ?? null)[param] ?? 0;
+        setRuleParams((prev) => ({ ...prev, [param]: fallback }));
+      }
+      setCalibration({
+        sku_name: selectedSku, decision_rule: selectedRule,
+        calibrated: false, params: {},
+      });
+    } catch (e) {
+      setInferError(e instanceof Error ? e.message : "Failed to clear calibration.");
+    }
+  }, [selectedSku, selectedRule, decisionRules]);
 
   // Keep stats scoped to the current SKU, Feature, and Decision Rule: an OK from
   // one rule is not comparable to an OK from another.
@@ -153,6 +237,12 @@ export default function App() {
       .catch(() => setInferError("Failed to load images for this SKU."))
       .finally(() => setImagesLoading(false));
   }, [selectedSku]);
+
+  useEffect(() => {
+    setCalibrationGroup((prev) =>
+      prev && calibrationGroups.includes(prev) ? prev : calibrationGroups[0] ?? null
+    );
+  }, [calibrationGroups.join("|")]);
 
   const handleModelLoaded = useCallback((result: LoadModelResponse) => {
     setModelStatus(result);
@@ -190,9 +280,7 @@ export default function App() {
     (name: string) => {
       const rule = decisionRules.find((r) => r.name === name);
       setSelectedRule(name);
-      setRuleParams(
-        Object.fromEntries((rule?.params ?? []).map((p) => [p.name, p.default]))
-      );
+      setRuleParams(seedParams(rule ?? null));
       setInferResult(null);
     },
     [decisionRules]
@@ -340,8 +428,15 @@ export default function App() {
             classLabels={classLabels}
             selectedRule={selectedRule}
             ruleParams={ruleParams}
+            calibration={calibration}
+            calibrationGroups={calibrationGroups}
+            calibrationGroup={calibrationGroup}
+            calibrating={calibrating}
             onRuleChange={handleRuleChange}
             onRuleParamChange={handleRuleParamChange}
+            onCalibrationGroupChange={setCalibrationGroup}
+            onCalibrate={handleCalibrate}
+            onClearCalibration={handleClearCalibration}
             onFeatureChange={handleFeatureChange}
             onSkuChange={setSelectedSku}
             onThresholdChange={setThreshold}

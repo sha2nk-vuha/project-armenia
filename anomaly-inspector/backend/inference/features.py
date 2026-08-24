@@ -112,7 +112,18 @@ def current_decision_rules() -> list[dict]:
     pipeline = current_pipeline()
     if pipeline is None:
         return []
-    return [decision.describe(r) for r in pipeline.compatible_rules()]
+    rules = []
+    for rule in pipeline.compatible_rules():
+        described = decision.describe(rule)
+        # The *effective* defaults, i.e. the rule's schema defaults with this
+        # model's sidecar layered on. The GUI seeds from these and echoes them
+        # back on every request, so seeding from the bare schema instead would
+        # silently override whatever the sidecar configured.
+        described["defaults"] = decision.resolve_params(
+            rule, pipeline.default_rule_params(rule.name)
+        )
+        rules.append(described)
+    return rules
 
 
 def reset() -> None:

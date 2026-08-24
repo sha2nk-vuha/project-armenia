@@ -176,12 +176,30 @@ class DecisionResult:
     annotations: list = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class Calibration:
+    """How a rule learns a per-SKU baseline from known-good samples.
+
+    Some artwork is not symmetric about its own centre, so it measures non-zero
+    even when correctly placed, by a margin that differs per SKU. Rather than
+    special-casing that in the API, a rule declares which of its params holds
+    that baseline and which measured metric feeds it; the calibrate endpoint
+    then works for any rule without knowing what the rule does.
+    """
+
+    param: str  # the param the taught value is written to
+    metric: str  # the DecisionResult.metrics key it is computed from
+    label: str = "Nominal"
+
+
 @runtime_checkable
 class DecisionRule(Protocol):
     name: str
     label: str
     consumes: frozenset[str]
     params: list[ParamSpec]
+    # Rules without a per-SKU baseline leave this None and are not calibratable.
+    calibration: Calibration | None
 
     def evaluate(self, ctx: DecisionContext) -> DecisionResult: ...
 

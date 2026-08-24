@@ -2,7 +2,12 @@ import { FolderUp } from "lucide-react";
 import { Label } from "./ui/label";
 import { ThresholdControl } from "./ThresholdControl";
 import { DecisionRuleControl } from "./DecisionRuleControl";
-import type { DecisionRuleInfo, FeatureInfo, RuleParams } from "../api/client";
+import type {
+  CalibrationState,
+  DecisionRuleInfo,
+  FeatureInfo,
+  RuleParams,
+} from "../api/client";
 
 interface Props {
   skus: string[];
@@ -18,8 +23,15 @@ interface Props {
   classLabels: Record<string, string>;
   selectedRule: string | null;
   ruleParams: RuleParams;
+  calibration: CalibrationState | null;
+  calibrationGroups: string[];
+  calibrationGroup: string | null;
+  calibrating: boolean;
   onRuleChange: (rule: string) => void;
   onRuleParamChange: (name: string, value: unknown) => void;
+  onCalibrationGroupChange: (group: string) => void;
+  onCalibrate: () => void;
+  onClearCalibration: () => void;
   onFeatureChange: (feature: string) => void;
   onSkuChange: (sku: string) => void;
   onThresholdChange: (value: number) => void;
@@ -41,8 +53,15 @@ export function InferencePanel({
   classLabels,
   selectedRule,
   ruleParams,
+  calibration,
+  calibrationGroups,
+  calibrationGroup,
+  calibrating,
   onRuleChange,
   onRuleParamChange,
+  onCalibrationGroupChange,
+  onCalibrate,
+  onClearCalibration,
   onFeatureChange,
   onSkuChange,
   onThresholdChange,
@@ -127,8 +146,16 @@ export function InferencePanel({
         selected={selectedRule}
         params={ruleParams}
         disabled={featureSwitching}
+        calibration={calibration}
+        calibrationGroups={calibrationGroups}
+        calibrationGroup={calibrationGroup}
+        calibrating={calibrating}
+        canCalibrate={!!selectedSku && calibrationGroups.length > 0}
         onSelect={onRuleChange}
         onParamChange={onRuleParamChange}
+        onCalibrationGroupChange={onCalibrationGroupChange}
+        onCalibrate={onCalibrate}
+        onClearCalibration={onClearCalibration}
       />
 
       {!modelLoaded && (

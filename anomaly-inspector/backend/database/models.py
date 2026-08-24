@@ -1,4 +1,13 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, LargeBinary, Text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime, timezone
 
@@ -34,3 +43,33 @@ class Inspection(Base):
     # Feature-specific visualizations; NULL when a Feature does not produce them.
     heatmap_image = Column(LargeBinary, nullable=True)
     segmentation_image = Column(LargeBinary, nullable=True)
+
+
+class SkuCalibration(Base):
+    """A per-SKU baseline taught from known-good samples, per Decision Rule.
+
+    Kept separate from `inspections` because it is configuration, not a record
+    of an inspection: it is read on every run and rewritten on every teach.
+    Scoped by (sku, feature, rule) because the same SKU inspected under a
+    different rule needs a different baseline.
+    """
+
+    __tablename__ = "sku_calibrations"
+    __table_args__ = (
+        UniqueConstraint("sku_name", "feature", "decision_rule", name="uq_sku_calibration"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sku_name = Column(String, nullable=False)
+    feature = Column(String, nullable=False)
+    decision_rule = Column(String, nullable=False)
+    # Taught param values as JSON, so a rule can grow its baseline without a
+    # migration; the rule's `calibration` declaration says what belongs here.
+    params = Column(Text, nullable=False)
+    sample_count = Column(Integer, nullable=False, default=0)
+    # Spread of the taught samples. A tolerance must sit above this or it is
+    # measuring sample noise, so it is recorded rather than discarded.
+    spread = Column(Float, nullable=True)
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )

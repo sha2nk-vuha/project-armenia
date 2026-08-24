@@ -270,3 +270,83 @@ balanced on a knife edge.
 - **`/model/` is gitignored,** so neither sidecar is version-controlled. A fresh
   clone gets no sidecar, and the segmentation model would then preprocess at the
   384 default instead of its actual 312 — silently wrong rather than broken.
+
+---
+
+# Follow-up: the multi-SKU threshold problem
+
+## Symptom
+
+With 3 cap designs and one tolerance, no cut existed. Passing the purple OK
+needed `> 0.2412`; failing the blue NOK needed `< 0.0544`.
+
+## Cause
+
+Mask shape, not the metric. The purple print is a ring -- text arced around the
+rim plus an emblem -- but the model segments only a crescent of it. A crescent's
+centroid sits far from the ring it came from, so a correctly placed purple cap
+measured 0.24 off-centre. Every centroid-style estimator inherits that bias, and
+because it depends on the artwork it differs per SKU. That per-SKU offset is
+precisely what a single threshold cannot absorb.
+
+## Fix: `outer_circle_fit`
+
+Fit a circle to the mask's outer edge instead of averaging its area. Where the
+artwork sits on a circle, that circle is concentric with the design centre
+whether or not the mask covers the whole ring.
+
+Seeded from the mask's own minimum enclosing circle, never the reference part --
+an estimator that consulted the cap centre could not be trusted to measure
+distance from it. Self-seeding also proved far more stable: the cap-seeded
+variant swung the purple OK between 0.02 and 0.21 across quantile settings,
+while self-seeded stays within 0.017-0.027 over 0.35-0.75.
+
+| method | max OK | min NOK | |
+|---|---|---|---|
+| min_enclosing_circle | 0.1499 | 0.0641 | overlaps |
+| convex_hull_centroid | 0.2412 | 0.0544 | overlaps |
+| mask_centroid | 0.2640 | 0.0541 | overlaps |
+| bbox_center | 0.2240 | 0.0545 | overlaps |
+| **outer_circle_fit** | **0.0531** | **0.0634** | **separates** |
+
+Sidecar adopts it at tolerance 0.06: **6/6 correct end to end**.
+
+It is a selectable method, not the default: it is meaningless on free-form
+artwork with no circular outer edge, where the fitted circle is arbitrary.
+
+## Fallback: per-SKU nominal
+
+`nominal_offset` holds a SKU's offset when correctly placed; the tolerance
+applies to the deviation from it. Two-sided on purpose -- artwork that should sit
+off-centre and arrives centred is equally wrong. Defaults to 0, so behaviour is
+unchanged until a SKU is taught.
+
+Taught via `POST /api/calibrate` from images known to be good. The median is used
+rather than the mean so one mislabelled sample cannot drag the baseline, and the
+spread is recorded because a tolerance below it would be measuring sample noise.
+
+Generic at the seam: a rule declares `Calibration(param=..., metric=...)` and the
+endpoint works without knowing what the rule does. Rules with no baseline
+(anomaly threshold, expected classes) declare `None` and are rejected.
+
+## Open issue: SKU granularity
+
+**Calibration is per-SKU, but all three cap designs currently live inside one SKU
+folder (`data/three_cee_caps`).** Teaching across them pools three different
+artworks into one baseline, which is meaningless -- and actively harmful:
+calibrating on the pooled `ok_case` gave nominal 0.0201, which moved the
+tolerance window enough to pass the blue NOK. **5/6, worse than not calibrating.**
+
+So with the data as it stands, uncalibrated `outer_circle_fit` at 0.06 is the
+correct configuration. To use calibration, each design needs its own SKU
+directory (`data/<design>/test/{ok_case,nok_case}`).
+
+## Evidence limits
+
+One OK and one NOK per design. The separating window is 0.0531-0.0634, about
+0.010 wide -- roughly 16%. That is not validated; it is the best configuration
+consistent with six images. `test_sample_caps.py` asserts the window still
+exists, so it fails while the margin is closing rather than after a verdict
+flips. Setting a defensible tolerance needs ~20-30 known-good caps per design to
+measure natural spread, and the spread measured on the three OK caps here
+(0.0394) is already two-thirds of the 0.06 tolerance.

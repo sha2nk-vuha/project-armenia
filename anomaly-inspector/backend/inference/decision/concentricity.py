@@ -16,6 +16,7 @@ import numpy as np
 
 from inference.decision.base import (
     COLOR_NEUTRAL,
+    Calibration,
     COLOR_NOK,
     COLOR_OK,
     COLOR_REFERENCE,
@@ -241,6 +242,12 @@ class ConcentricityRule:
             options=CENTER_METHODS,
         ),
     ]
+
+    # Teaching `nominal_offset` from the median measured offset of known-good
+    # caps is what lets one tolerance serve SKUs whose artwork is not symmetric.
+    calibration = Calibration(
+        param="nominal_offset", metric="offset_ratio", label="Nominal Offset"
+    )
 
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
         labels = ctx.labels

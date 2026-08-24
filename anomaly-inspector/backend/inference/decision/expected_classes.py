@@ -31,6 +31,7 @@ class ExpectedClassesRule:
             help="Every class listed must be detected for an OK Verdict.",
         )
     ]
+    calibration = None
 
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
         expected = [
