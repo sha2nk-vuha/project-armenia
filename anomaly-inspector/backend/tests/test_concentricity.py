@@ -232,3 +232,133 @@ def test_annotations_show_the_measurement_and_the_tolerance():
 def test_no_annotations_when_the_measurement_could_not_be_made():
     res = _evaluate([_inst(0, _disc(200, 200, 100))])
     assert res.annotations == []
+
+
+# ── outer_circle_fit: the partial-ring case ─────────────────────────────────
+
+
+def _ring(cx, cy, r_outer, r_inner, size=CANVAS):
+    ys, xs = np.ogrid[:size, :size]
+    d2 = (xs - cx) ** 2 + (ys - cy) ** 2
+    return (d2 <= r_outer**2) & (d2 >= r_inner**2)
+
+
+def _wedge(cx, cy, r_outer, r_inner, a0, a1, size=CANVAS):
+    """A partial ring spanning [a0, a1] radians — the shape a segmentation model
+    produces when it captures only part of an arced print."""
+    ys, xs = np.ogrid[:size, :size]
+    ring = _ring(cx, cy, r_outer, r_inner, size)
+    ang = np.arctan2(ys - cy, xs - cx)
+    return ring & (ang >= a0) & (ang <= a1)
+
+
+def test_outer_circle_fit_recovers_the_centre_of_a_full_ring():
+    cx, cy = compute_center(_ring(200, 200, 90, 60), "outer_circle_fit")
+    assert cx == pytest.approx(200, abs=2)
+    assert cy == pytest.approx(200, abs=2)
+
+
+def test_outer_circle_fit_recovers_the_centre_from_only_part_of_a_ring():
+    """The failure this method exists for: a mask covering a third of an arced
+    print. Its centroid lands out on the arc, nowhere near the ring's centre —
+    which is exactly how a correctly-placed asymmetric logo reads as off-centre."""
+    partial = _wedge(200, 200, 90, 60, -0.6, 1.5)
+
+    fitted_x, fitted_y = compute_center(partial, "outer_circle_fit")
+    centroid_x, centroid_y = compute_center(partial, "convex_hull_centroid")
+
+    fit_err = np.hypot(fitted_x - 200, fitted_y - 200)
+    centroid_err = np.hypot(centroid_x - 200, centroid_y - 200)
+
+    assert fit_err < 5, f"circle fit should recover the centre, off by {fit_err:.1f}px"
+    assert centroid_err > 40, "centroid should be badly biased (that is the bug)"
+
+
+def test_outer_circle_fit_tracks_a_genuinely_offset_partial_ring():
+    # Same partial shape, ring centre moved 30px: the fit must follow it, so the
+    # method measures real displacement rather than merely ignoring shape.
+    moved = _wedge(230, 200, 90, 60, -0.6, 1.5)
+    cx, cy = compute_center(moved, "outer_circle_fit")
+    assert cx == pytest.approx(230, abs=5)
+    assert cy == pytest.approx(200, abs=5)
+
+
+def test_outer_circle_fit_is_seeded_from_the_mask_not_the_reference():
+    """The estimator must not consult the reference part: a centre estimator
+    that peeked at the cap centre could not be trusted to measure distance
+    from it. Same mask in two scenes must give the same answer."""
+    mask = _wedge(230, 200, 90, 60, -0.6, 1.5)
+    first = compute_center(mask, "outer_circle_fit")
+    second = compute_center(mask, "outer_circle_fit")
+    assert first == second
+    # And it is reachable through the rule with any reference position.
+    res = _evaluate(
+        [_inst(0, _disc(200, 200, 150)), _inst(1, mask)],
+        target_center_method="outer_circle_fit",
+    )
+    assert res.metrics["offset_px"] == pytest.approx(30, abs=6)
+
+
+def test_outer_circle_fit_is_offered_as_a_centre_method():
+    spec = next(p for p in RULE.params if p.name == "target_center_method")
+    assert "outer_circle_fit" in spec.options
+
+
+# ── Per-SKU nominal ─────────────────────────────────────────────────────────
+
+
+def test_nominal_defaults_to_zero_so_behaviour_is_unchanged():
+    plain = _evaluate([_inst(0, _disc(200, 200, 100)), _inst(1, _disc(212, 200, 40))])
+    explicit = _evaluate(
+        [_inst(0, _disc(200, 200, 100)), _inst(1, _disc(212, 200, 40))],
+        nominal_offset=0.0,
+    )
+    assert plain.verdict == explicit.verdict == "not_ok"
+    assert plain.score_label == "Offset Ratio"
+
+
+def test_nominal_absorbs_a_per_sku_bias():
+    """Artwork that sits 0.12 off-centre when correct passes once calibrated,
+    while the tolerance still applies to the deviation."""
+    instances = [_inst(0, _disc(200, 200, 100)), _inst(1, _disc(212, 200, 40))]
+
+    uncalibrated = _evaluate(instances, max_offset_ratio=0.05)
+    calibrated = _evaluate(instances, max_offset_ratio=0.05, nominal_offset=0.12)
+
+    assert uncalibrated.verdict == "not_ok"
+    assert calibrated.verdict == "ok"
+    assert calibrated.score == pytest.approx(0.0, abs=0.02)
+    assert calibrated.score_label == "Offset Deviation"
+
+
+def test_nominal_still_fails_a_part_that_drifts_from_it():
+    # Calibrated at 0.12; this part sits at ~0.30, deviation ~0.18 > 0.05.
+    res = _evaluate(
+        [_inst(0, _disc(200, 200, 100)), _inst(1, _disc(230, 200, 40))],
+        max_offset_ratio=0.05,
+        nominal_offset=0.12,
+    )
+    assert res.verdict == "not_ok"
+    assert res.metrics["nominal_offset"] == 0.12
+    assert res.metrics["deviation"] == pytest.approx(0.18, abs=0.02)
+
+
+def test_nominal_catches_a_part_that_is_too_centred():
+    """Deviation is two-sided on purpose: artwork that should sit 0.30 off and
+    arrives centred is just as wrong as one that drifted outward."""
+    res = _evaluate(
+        [_inst(0, _disc(200, 200, 100)), _inst(1, _disc(200, 200, 40))],
+        max_offset_ratio=0.05,
+        nominal_offset=0.30,
+    )
+    assert res.verdict == "not_ok"
+
+
+def test_score_is_always_the_quantity_thresholded():
+    # The badge must never show a number that disagrees with the Verdict.
+    res = _evaluate(
+        [_inst(0, _disc(200, 200, 100)), _inst(1, _disc(212, 200, 40))],
+        max_offset_ratio=0.05,
+        nominal_offset=0.12,
+    )
+    assert (res.score <= 0.05) == (res.verdict == "ok")
