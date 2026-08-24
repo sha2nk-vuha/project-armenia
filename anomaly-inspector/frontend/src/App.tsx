@@ -607,10 +607,6 @@ export default function App() {
             </p>
           )}
 
-          {inferResult?.feature === "cascade" && (
-            <CascadeStages stages={inferResult.stages ?? []} />
-          )}
-
           <ResultsDisplay
             feature={resultFeature}
             originalPreview={originalSrc}
@@ -618,8 +614,12 @@ export default function App() {
             segmentation={inferResult?.segmentation_image ?? null}
             annotated={inferResult?.annotated_image ?? inferResult?.overlay_image ?? null}
             detections={inferResult?.detections ?? null}
-            metrics={inferResult?.metrics ?? null}
+            metrics={inferResult?.feature === "cascade" ? null : inferResult?.metrics ?? null}
           />
+
+          {inferResult?.feature === "cascade" && (
+            <CascadeStages stages={inferResult.stages ?? []} />
+          )}
         </section>
       </main>
     </div>

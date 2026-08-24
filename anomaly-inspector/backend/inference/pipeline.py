@@ -61,12 +61,31 @@ class InferenceResult:
     stages: list["StageResult"] = field(default_factory=list)
 
 
+# Human labels for the image keys pipelines emit. One source of truth so a
+# cascade can present a stage's images generically; a new image kind is labelled
+# by adding one entry here, with no frontend change (see docs/adr/0002, 0006).
+IMAGE_LABELS = {
+    "heatmap": "Heatmap",
+    "segmentation": "Segmentation",
+    "annotated": "Detections",
+    "overlay": "Overlay",
+}
+
+
+def labelled_images(images: dict[str, bytes]) -> list[tuple[str, bytes]]:
+    """Order-preserving (label, bytes) pairs for a pipeline's image dict."""
+    return [(IMAGE_LABELS.get(key, key.replace("_", " ").title()), img)
+            for key, img in images.items()]
+
+
 @dataclass
 class StageResult:
     """One stage's outcome within a Cascade.
 
     `evaluated` is False for a stage the cascade short-circuited past: it did not
-    run, so it has no Verdict of its own and must not be read as OK.
+    run, so it has no Verdict of its own and must not be read as OK. `images` is
+    that stage's full set of labelled visualizations (a cascade shows them all,
+    not just one).
     """
 
     feature: str
@@ -76,7 +95,7 @@ class StageResult:
     score: float | None = None
     score_label: str = ""
     reason: str = ""
-    image: bytes | None = None
+    images: list[tuple[str, bytes]] = field(default_factory=list)
     detections: list[dict] | None = None
 
 

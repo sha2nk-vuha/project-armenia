@@ -76,9 +76,27 @@ export function ResultsDisplay({
     return () => ro.disconnect();
   }, []);
 
+  // A cascade has no single Feature's views: it shows Original here and each
+  // stage's own visualizations in the per-stage breakdown.
+  const isCascade = feature === "cascade";
   // Detector-backed Features render one annotated image plus a detection list;
   // Anomaly Detection renders its heatmap/segmentation pair.
   const isDetectorFeature = feature === "presence_absence" || feature === "segmentation";
+
+  if (isCascade) {
+    return (
+      <div className="flex flex-col gap-1 w-full">
+        <span className="text-xs font-medium text-gray-500 text-center">Original</span>
+        <div className="w-full max-h-64 rounded-2xl bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center">
+          {originalPreview ? (
+            <img src={originalPreview} alt="Original" className="max-h-64 w-auto object-contain" />
+          ) : (
+            <span className="text-xs text-gray-400 py-8">—</span>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3 w-full">

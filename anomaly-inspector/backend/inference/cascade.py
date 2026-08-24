@@ -8,7 +8,12 @@ list of the existing pipelines plus a reduce step. See docs/adr/0006.
 from dataclasses import dataclass
 
 from inference.combine.base import Combinator
-from inference.pipeline import InferenceResult, StageResult, _PipelineBase
+from inference.pipeline import (
+    InferenceResult,
+    StageResult,
+    _PipelineBase,
+    labelled_images,
+)
 
 
 @dataclass
@@ -90,7 +95,7 @@ class CascadePipeline:
                     score=result.score,
                     score_label=result.score_label,
                     reason=result.reason,
-                    image=_primary_image(result.images),
+                    images=labelled_images(result.images),
                     detections=result.detections,
                 )
             )
@@ -126,18 +131,6 @@ class CascadePipeline:
             },
             stages=stage_results,
         )
-
-
-# Order matches what each single-Feature pipeline puts in `images`; the first
-# present is the one worth showing per stage.
-_PREFERRED_IMAGE_KEYS = ("annotated", "overlay", "segmentation", "heatmap")
-
-
-def _primary_image(images: dict[str, bytes]) -> bytes | None:
-    for key in _PREFERRED_IMAGE_KEYS:
-        if key in images:
-            return images[key]
-    return next(iter(images.values()), None)
 
 
 def _decisive_stage(stage_results: list[StageResult], verdict: str) -> int | None:

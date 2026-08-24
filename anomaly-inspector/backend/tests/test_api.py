@@ -725,10 +725,12 @@ class _StubCascade:
             stages=[
                 StageResult("anomaly_detection", "anomaly_threshold", "ok", True,
                             score=0.2, score_label="Anomaly Score",
-                            reason="0.20 < 0.95", image=b"anom"),
+                            reason="0.20 < 0.95",
+                            images=[("Heatmap", b"heat"), ("Segmentation", b"seg")]),
                 StageResult("segmentation", "concentricity", "not_ok", True,
                             score=0.30, score_label="Offset Ratio",
-                            reason="offset 0.30 > 0.06", image=b"seg"),
+                            reason="offset 0.30 > 0.06",
+                            images=[("Detections", b"annot")]),
             ],
         )
 
@@ -764,7 +766,9 @@ def test_cascade_infer_returns_combined_verdict_and_per_stage_breakdown(cascade_
     assert body["stages"][0]["feature"] == "anomaly_detection"
     assert body["stages"][0]["verdict"] == "ok"
     assert body["stages"][1]["verdict"] == "not_ok"
-    assert body["stages"][1]["image"] is not None
+    assert body["stages"][0]["images"][0]["label"] == "Heatmap"
+    assert len(body["stages"][0]["images"]) == 2
+    assert body["stages"][1]["images"][0]["label"] == "Detections"
     assert "segmentation" in body["reason"]
 
 

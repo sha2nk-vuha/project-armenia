@@ -92,11 +92,12 @@ def test_or_short_circuits_on_first_pass():
     assert result.stages[1].verdict == "skipped"
 
 
-def test_stage_results_carry_image_and_reason():
+def test_stage_results_carry_labelled_images_and_reason():
     result = _cascade([_stage("a", "ok"), _stage("b", "not_ok")]).infer(b"x", 0.5)
     s0 = result.stages[0]
     assert s0.feature == "a"
-    assert s0.image == b"img-a"
+    # The stub emits an "annotated" image -> labelled "Detections".
+    assert s0.images == [("Detections", b"img-a")]
     assert "says ok" in s0.reason
 
 

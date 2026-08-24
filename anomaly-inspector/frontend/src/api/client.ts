@@ -80,6 +80,12 @@ export type RuleParams = Record<string, unknown>;
 
 // One stage's outcome inside a Cascade result. `evaluated` is false for a stage
 // the cascade short-circuited past.
+// A labelled visualization within a stage (e.g. "Heatmap", "Detections").
+export interface LabelledImage {
+  label: string;
+  image: string | null;
+}
+
 export interface StageResult {
   feature: string;
   decision_rule: string;
@@ -88,7 +94,8 @@ export interface StageResult {
   score: number | null;
   score_label: string;
   reason: string;
-  image: string | null;
+  // The stage's full set of visualizations, in the order the pipeline produced them.
+  images: LabelledImage[];
   detections: Detection[] | null;
 }
 

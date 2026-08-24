@@ -527,7 +527,9 @@ async def infer(
                 "score": round(st.score, 4) if st.score is not None else None,
                 "score_label": st.score_label,
                 "reason": st.reason,
-                "image": _b64(st.image),
+                "images": [
+                    {"label": label, "image": _b64(img)} for label, img in st.images
+                ],
                 "detections": st.detections,
             }
             for st in result.stages
