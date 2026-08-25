@@ -125,8 +125,13 @@ class CascadePipeline:
                         "evaluated": s.evaluated,
                         "score": s.score,
                         "reason": s.reason,
+                        # Per-stage threshold + model version so a customer-facing
+                        # report can explain, per stage, under what tolerance and
+                        # with which model the verdict was reached.
+                        "threshold": stage.threshold,
+                        "model_version": stage.pipeline.model_version,
                     }
-                    for s in stage_results
+                    for s, stage in zip(stage_results, self.stages)
                 ],
             },
             stages=stage_results,

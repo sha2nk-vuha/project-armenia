@@ -14,8 +14,7 @@ import type {
 } from "../api/client";
 
 interface Props {
-  skus: string[];
-  selectedSku: string | null;
+  selectedSku: string;
   threshold: number;
   customerName: string;
   modelLoaded: boolean;
@@ -48,10 +47,11 @@ interface Props {
   onThresholdChange: (value: number) => void;
   onCustomerChange: (value: string) => void;
   onUploadDirectory: (files: FileList) => void;
+  onRunAll: () => void;
+  batchRunning: boolean;
 }
 
 export function InferencePanel({
-  skus,
   selectedSku,
   threshold,
   customerName,
@@ -85,6 +85,8 @@ export function InferencePanel({
   onThresholdChange,
   onCustomerChange,
   onUploadDirectory,
+  onRunAll,
+  batchRunning,
 }: Props) {
   const canUpload = (isCascade || modelLoaded) && !!selectedSku;
 
@@ -135,24 +137,16 @@ export function InferencePanel({
 
       <div className="space-y-1.5">
         <Label htmlFor="sku">SKU</Label>
-        <select
+        <input
           id="sku"
-          value={selectedSku ?? ""}
+          type="text"
+          value={selectedSku}
           onChange={(e) => onSkuChange(e.target.value)}
-          disabled={skus.length === 0}
-          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-yellow-400 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <option value="" disabled>
-            {skus.length ? "Select a SKU…" : "No SKUs found"}
-          </option>
-          {skus.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+          placeholder="Enter SKU name"
+          className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-yellow-400"
+        />
         <p className="text-[11px] text-gray-400">
-          Pick a SKU, then click any image to inspect it.
+          Enter a SKU name to scope calibration and stats.
         </p>
       </div>
 
@@ -232,6 +226,19 @@ export function InferencePanel({
           Browse the folder's images, then click any to inspect it.
         </p>
       </div>
+
+      <button
+        type="button"
+        onClick={onRunAll}
+        disabled={!canUpload || batchRunning}
+        className={`flex items-center justify-center gap-2 h-9 w-full rounded-md text-sm font-medium transition-colors ${
+          canUpload && !batchRunning
+            ? "bg-yellow-400 text-gray-900 hover:bg-yellow-500"
+            : "bg-gray-200 text-gray-400 cursor-not-allowed"
+        }`}
+      >
+        {batchRunning ? "Running…" : "Run all images"}
+      </button>
     </div>
   );
 }

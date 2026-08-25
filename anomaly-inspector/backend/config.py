@@ -67,8 +67,3 @@ FEATURES: dict[str, dict] = {
         "composite": True,
     },
 }
-
-# Root of the on-disk image dataset browsable from the UI. Each immediate
-# subdirectory that contains a `test/` folder is treated as a SKU (e.g. the
-# MVTec AD object categories: pill, bottle, cable, ...).
-DATA_ROOT = Path(os.environ.get("DATA_ROOT", _REPO_ROOT / "data" / "MVTecAD"))

@@ -1,5 +1,5 @@
 import { Loader2 } from "lucide-react";
-import { api, type DatasetImage } from "../api/client";
+import { type DatasetImage } from "../api/client";
 import { cn } from "../lib/utils";
 
 interface Props {
@@ -32,7 +32,7 @@ export function ImageGallery({
   if (images.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-sm text-gray-400">
-        Select a SKU or upload a folder to browse images.
+        Upload a folder to browse images.
       </div>
     );
   }
@@ -78,7 +78,7 @@ export function ImageGallery({
                   )}
                 >
                   <img
-                    src={img.url ?? api.imageUrl(img.path)}
+                    src={img.url ?? ""}
                     alt={img.name}
                     loading="lazy"
                     className="w-full h-full object-cover"

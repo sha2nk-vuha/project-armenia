@@ -183,8 +183,7 @@ export interface DatasetImage {
   path: string;
   category: string;
   name: string;
-  // Thumbnail source override for locally-uploaded images (an object URL).
-  // Dataset images omit this and are served from the backend by `path`.
+  // Thumbnail source: an object URL for the locally-uploaded image.
   url?: string;
 }
 
@@ -249,21 +248,6 @@ export const api = {
     return handleResponse<InferResponse>(res);
   },
 
-  async inferByPath(
-    imagePath: string,
-    skuName: string,
-    threshold: number,
-    customerName: string,
-    decisionRule?: string | null,
-    ruleParams?: RuleParams | null,
-    cascadeSpec?: CascadeSpec | null
-  ): Promise<InferResponse> {
-    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams, cascadeSpec);
-    form.append("image_path", imagePath);
-    const res = await fetch("/api/infer", { method: "POST", body: form });
-    return handleResponse<InferResponse>(res);
-  },
-
   async getCascadeOptions(): Promise<CascadeOptions> {
     const res = await fetch("/api/cascade/options");
     return handleResponse<CascadeOptions>(res);
@@ -286,15 +270,11 @@ export const api = {
     decisionRule: string,
     threshold: number,
     ruleParams: RuleParams,
-    // Dataset samples by path, and browser-uploaded samples as files. A folder
-    // browsed in the GUI lives only in the browser, so its files must be sent.
-    imagePaths: string[],
     imageFiles: File[]
   ): Promise<CalibrateResult> {
     const form = new FormData();
     form.append("sku_name", skuName);
     form.append("decision_rule", decisionRule);
-    form.append("image_paths", JSON.stringify(imagePaths));
     form.append("threshold", String(threshold));
     form.append("rule_params", JSON.stringify(ruleParams));
     for (const file of imageFiles) form.append("images", file);
@@ -308,22 +288,6 @@ export const api = {
       { method: "DELETE" }
     );
     return handleResponse<{ cleared: boolean }>(res);
-  },
-
-  async getSkus(): Promise<string[]> {
-    const res = await fetch("/api/skus");
-    const data = await handleResponse<{ skus: string[] }>(res);
-    return data.skus;
-  },
-
-  async getSkuImages(sku: string): Promise<DatasetImage[]> {
-    const res = await fetch(`/api/skus/${encodeURIComponent(sku)}/images`);
-    const data = await handleResponse<{ images: DatasetImage[] }>(res);
-    return data.images;
-  },
-
-  imageUrl(path: string): string {
-    return `/api/images?path=${encodeURIComponent(path)}`;
   },
 
   async getStats(

@@ -2,14 +2,11 @@ import base64
 import io
 import json
 import logging
-from collections import defaultdict
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from config import (
     APP_VERSION,
     CASCADE_FEATURE,
-    DATA_ROOT,
     DEFAULT_FEATURE,
     FEATURES,
 )
@@ -17,7 +14,7 @@ from database import crud
 from database.db import get_db, init_db
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from inference import engine, features
 from inference.decision import ClassNotFound
 from PIL import Image
@@ -46,57 +43,6 @@ def startup() -> None:
         features.activate(DEFAULT_FEATURE)
     except ValueError as e:
         logging.warning("Could not set default Feature '%s': %s", DEFAULT_FEATURE, e)
-
-
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
-
-
-def _resolve_data_path(rel_path: str) -> Path:
-    """Resolve a dataset-relative path, rejecting anything outside DATA_ROOT."""
-    root = DATA_ROOT.resolve()
-    target = (root / rel_path).resolve()
-    if root != target and root not in target.parents:
-        raise HTTPException(status_code=400, detail="Path is outside the dataset root.")
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="Image not found.")
-    return target
-
-
-@app.get("/api/skus")
-def list_skus():
-    """SKUs are dataset subdirectories that contain a `test/` folder."""
-    if not DATA_ROOT.exists():
-        return {"skus": []}
-    skus = sorted(
-        p.name for p in DATA_ROOT.iterdir() if p.is_dir() and (p / "test").is_dir()
-    )
-    return {"skus": skus}
-
-
-@app.get("/api/skus/{sku}/images")
-def list_sku_images(sku: str):
-    """List the test images for a SKU, grouped implicitly by defect category."""
-    test_dir = (DATA_ROOT / sku / "test").resolve()
-    root = DATA_ROOT.resolve()
-    if root not in test_dir.parents or not test_dir.is_dir():
-        raise HTTPException(status_code=404, detail="SKU not found.")
-    images = []
-    for f in sorted(test_dir.rglob("*")):
-        if f.is_file() and f.suffix.lower() in _IMAGE_EXTS:
-            images.append(
-                {
-                    "path": str(f.relative_to(root)),
-                    "category": f.parent.name,
-                    "name": f.name,
-                }
-            )
-    return {"sku": sku, "images": images}
-
-
-@app.get("/api/images")
-def get_image(path: str):
-    """Serve a dataset image by its DATA_ROOT-relative path (for thumbnails)."""
-    return FileResponse(_resolve_data_path(path))
 
 
 def _feature_catalog() -> list[dict]:
@@ -268,7 +214,6 @@ def clear_sku_calibration(
 async def calibrate(
     sku_name: str = Form(...),
     threshold: float = Form(...),
-    image_paths: str = Form("[]"),
     images: list[UploadFile] = File(default=[]),
     decision_rule: str = Form(""),
     rule_params: str = Form(""),
@@ -292,19 +237,9 @@ async def calibrate(
             detail=f"Decision Rule {rule.name!r} has no per-SKU baseline to teach.",
         )
 
-    try:
-        paths = json.loads(image_paths)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="image_paths must be valid JSON.")
-    if not isinstance(paths, list):
-        raise HTTPException(status_code=400, detail="image_paths must be a JSON list.")
-
-    # Samples arrive either as dataset paths or as uploaded files (a folder
-    # browsed in the GUI lives in the browser, not on disk). Read both into a
-    # (label, bytes) list so the measurement loop treats them uniformly.
-    samples: list[tuple[str, bytes]] = [
-        (rel, _resolve_data_path(rel).read_bytes()) for rel in paths
-    ]
+    # Samples arrive as uploaded files (a folder browsed in the GUI lives in
+    # the browser, not on disk). Read into a (label, bytes) list.
+    samples: list[tuple[str, bytes]] = []
     for upload in images:
         samples.append((upload.filename or "uploaded", await upload.read()))
 
@@ -411,19 +346,13 @@ async def infer(
     decision_rule: str = Form(""),
     rule_params: str = Form(""),
     cascade_spec: str = Form(""),
-    image: UploadFile | None = File(None),
-    image_path: str | None = Form(None),
+    image: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
     is_cascade = features.get_active_feature() == CASCADE_FEATURE
 
-    # Image source: an uploaded file, or a path into the on-disk dataset.
-    if image is not None:
-        image_bytes = await image.read()
-    elif image_path:
-        image_bytes = _resolve_data_path(image_path).read_bytes()
-    else:
-        raise HTTPException(status_code=400, detail="Provide an image file or image_path.")
+    # Image source: an uploaded file (folder images live in the browser).
+    image_bytes = await image.read()
 
     try:
         Image.open(io.BytesIO(image_bytes)).verify()
@@ -581,51 +510,27 @@ def get_report(
         )
         raise HTTPException(status_code=404, detail=detail)
 
-    total = len(inspections)
-    ok_count = sum(1 for i in inspections if i.verdict == "ok")
-    not_ok_count = total - ok_count
-    pass_rate = round(ok_count / total * 100, 1)
-    threshold_values = [i.threshold for i in inspections]
-
-    # Per-SKU breakdown: each SKU is reported independently, then aggregated.
-    sku_groups: dict[str, list] = defaultdict(list)
-    for i in inspections:
-        sku_groups[i.sku_name].append(i)
-
-    sku_stats = []
-    for sku in sorted(sku_groups):
-        items = sku_groups[sku]
-        s_total = len(items)
-        s_ok = sum(1 for x in items if x.verdict == "ok")
-        s_not_ok = s_total - s_ok
-        s_thresholds = [x.threshold for x in items]
-        sku_stats.append(
-            {
-                "sku_name": sku,
-                "total": s_total,
-                "ok": s_ok,
-                "not_ok": s_not_ok,
-                "pass_rate": round(s_ok / s_total * 100, 1) if s_total else 0.0,
-                "threshold_min": min(s_thresholds),
-                "threshold_max": max(s_thresholds),
-            }
-        )
-
-    current_sess = features.active_model()
-    model_version = current_sess.model_version if current_sess else "unknown"
+    # Flat row-dicts for the report layer; metrics JSON parsed best-effort there.
+    report_rows = [
+        {
+            "timestamp": i.timestamp,
+            "sku_name": i.sku_name,
+            "feature": i.feature,
+            "score": i.score,
+            "threshold": i.threshold,
+            "verdict": i.verdict,
+            "model_version": i.model_version,
+            "decision_rule": i.decision_rule,
+            "metrics": i.metrics,
+        }
+        for i in inspections
+    ]
 
     pdf_bytes = generate_report(
         start_date=start,
         end_date=end,
-        total=total,
-        ok_count=ok_count,
-        not_ok_count=not_ok_count,
-        pass_rate=pass_rate,
-        sku_stats=sku_stats,
-        threshold_min=min(threshold_values),
-        threshold_max=max(threshold_values),
+        inspections=report_rows,
         customer_name=customer_name,
-        model_version=model_version,
         app_version=APP_VERSION,
     )
 
