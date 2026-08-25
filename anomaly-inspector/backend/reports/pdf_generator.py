@@ -15,26 +15,41 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from inference.verdict import NOT_OK, OK, cascade_nok_reason
+
 # Feature label + threshold-label lookup, mirroring config.FEATURES. Imported
 # lazily so pdf_generator stays import-safe in tests without the app config.
 try:
     from config import FEATURES as _FEATURE_CATALOG
-except Exception:  # pragma: no cover - config always present in-app
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - config always present in-app
     _FEATURE_CATALOG = {}
 
 
 def _feature_label(feature: str) -> str:
+    """Human label for a Feature.
+
+    Falls back to a title-cased form of the id when the Feature is unknown.
+
+    Args:
+        feature: Feature name from config.FEATURES.
+
+    Returns:
+        Operator-facing label.
+    """
     entry = _FEATURE_CATALOG.get(feature, {})
     return entry.get("label", feature.replace("_", " ").title())
 
 
-def _threshold_label(feature: str) -> str:
-    entry = _FEATURE_CATALOG.get(feature, {})
-    return entry.get("threshold_label", "Threshold")
-
-
 def _parse_metrics(raw: str | None) -> dict:
-    """Best-effort parse of the metrics JSON column. Never raises."""
+    """Best-effort parse of the metrics JSON column.
+
+    Args:
+        raw: Raw JSON string from the inspections.metrics column, a parsed
+            dict, or None (legacy rows).
+
+    Returns:
+        Parsed dict when it is a dict; {} otherwise. Never raises.
+    """
     if not raw:
         return {}
     try:
@@ -45,6 +60,14 @@ def _parse_metrics(raw: str | None) -> dict:
 
 
 def _fmt_score(score) -> str:
+    """Format a score for the report table, tolerating None/truncation.
+
+    Args:
+        score: The score value, possibly None or a non-numeric placeholder.
+
+    Returns:
+        Two-decimal string, or "—" when not formattable.
+    """
     if score is None:
         return "—"
     try:
@@ -54,6 +77,14 @@ def _fmt_score(score) -> str:
 
 
 def _fmt_threshold(value) -> str:
+    """Format a threshold for the report table.
+
+    Args:
+        value: Threshold value, possibly missing or non-numeric.
+
+    Returns:
+        Two-decimal string, or "—" when not formattable.
+    """
     try:
         return f"{float(value):.2f}"
     except (TypeError, ValueError):
@@ -61,7 +92,15 @@ def _fmt_threshold(value) -> str:
 
 
 def _fmt_threshold_range(values) -> str:
-    """Min–max if they differ, single value otherwise."""
+    """Format a per-group threshold as a single value or min–max range.
+
+    Args:
+        values: Thresholds of inspections belonging to one group.
+
+    Returns:
+        "—" when none are numeric, one value when all equal, otherwise
+        "lo–hi".
+    """
     nums = [v for v in values if isinstance(v, (int, float))]
     if not nums:
         return "—"
@@ -86,6 +125,17 @@ def generate_report(
     (str), ``decision_rule`` (str|None), and ``metrics`` (raw JSON text, a parsed
     dict, or None). Grouping, stats, and layout all happen here so the caller
     (main.py) stays thin.
+
+    Args:
+        start_date: Inclusive start of the requested date range.
+        end_date: Inclusive end of the requested date range.
+        inspections: Flat inspection row dicts (from _report_row).
+        app_version: Version string stamped into the report header.
+        customer_name: Optional customer to title the report for.
+
+    Returns:
+        Complete PDF file contents as bytes (consumed by the endpoint's
+        Response).
     """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -177,7 +227,7 @@ def generate_report(
     story.append(Spacer(1, 6 * mm))
 
     total = len(inspections)
-    ok_count = sum(1 for i in inspections if i["verdict"] == "ok")
+    ok_count = sum(1 for i in inspections if i["verdict"] == OK)
     not_ok_count = total - ok_count
     pass_rate = round(ok_count / total * 100, 1) if total else 0.0
 
@@ -197,7 +247,7 @@ def generate_report(
     for (sku, feature) in sorted(groups):
         items = groups[(sku, feature)]
         s_total = len(items)
-        s_ok = sum(1 for x in items if x["verdict"] == "ok")
+        s_ok = sum(1 for x in items if x["verdict"] == OK)
         s_not_ok = s_total - s_ok
         s_thr = _fmt_threshold_range([x["threshold"] for x in items])
         per_sku_data.append([
@@ -267,98 +317,104 @@ def generate_report(
     story.append(_stats_table(thr_data, [40 * mm, 45 * mm, 45 * mm, 30 * mm]))
     story.append(Spacer(1, 6 * mm))
 
+    def _reason_for_case(metrics: dict | None) -> str:
+        """Resolve a NOK case's human reason, handling cascades and legacy rows."""
+        if isinstance(metrics, dict) and metrics.get("stages"):
+            return cascade_nok_reason(metrics) or "cascade NOK (see stage breakdown below)"
+        if not metrics:
+            return "details not recorded"
+        return ""
+
+    def _stage_subtable(metrics: dict | None) -> Table | None:
+        """Indented per-stage breakdown for a cascade NOK case, if any."""
+        if not isinstance(metrics, dict) or not metrics.get("stages"):
+            return None
+        stage_rows = [[
+            _cell("Stage", stage_cell_style),
+            _cell("Model", stage_cell_style),
+            _cell("Score", stage_cell_style),
+            _cell("Threshold", stage_cell_style),
+            _cell("Verdict", stage_cell_style),
+            _cell("Reason", stage_cell_style),
+        ]]
+        for s in metrics["stages"]:
+            stage_rows.append([
+                _cell(f"  {s.get('feature', '?')}", stage_cell_style),
+                _cell(s.get("model_version", "—"), stage_cell_style),
+                _cell(_fmt_score(s.get("score")), stage_cell_style),
+                _cell(_fmt_threshold(s.get("threshold")), stage_cell_style),
+                _cell(s.get("verdict", "—"), stage_cell_style),
+                _cell(s.get("reason", "") or "—", stage_cell_style),
+            ])
+        sub = Table(stage_rows, colWidths=[28 * mm, 30 * mm, 14 * mm, 16 * mm, 16 * mm, 56 * mm])
+        sub.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        return sub
+
     # ── NOK Cases ───────────────────────────────────────────────────────────
-    nok_cases = [i for i in inspections if i["verdict"] == "not_ok"]
+    nok_cases = [i for i in inspections if i["verdict"] == NOT_OK]
     story.append(Paragraph(f"NOK Cases ({len(nok_cases)})", heading_style))
 
     if not nok_cases:
         story.append(Paragraph("No NOK cases in the selected range.", normal))
-    else:
-        nok_rows = [[
-            _cell("Time (UTC)", cell_bold), _cell("SKU", cell_bold),
-            _cell("Feature", cell_bold), _cell("Decision Rule", cell_bold),
-            _cell("Score", cell_bold), _cell("Threshold", cell_bold),
-            _cell("Reason", cell_bold),
-        ]]
-        col_widths = [24 * mm, 20 * mm, 22 * mm, 24 * mm, 14 * mm, 16 * mm, 50 * mm]
+        doc.build(story)
+        return buffer.getvalue()
 
-        for case in nok_cases:
-            ts = case["timestamp"]
-            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
-            score = case["score"]
-            threshold = case["threshold"]
-            feature = case["feature"]
-            rule = case["decision_rule"] or "—"
-            metrics = case.get("metrics")
-            if isinstance(metrics, str):
-                metrics = _parse_metrics(metrics)
-            elif metrics is None:
-                metrics = {}
+    nok_rows = [[
+        _cell("Time (UTC)", cell_bold), _cell("SKU", cell_bold),
+        _cell("Feature", cell_bold), _cell("Decision Rule", cell_bold),
+        _cell("Score", cell_bold), _cell("Threshold", cell_bold),
+        _cell("Reason", cell_bold),
+    ]]
+    col_widths = [24 * mm, 20 * mm, 22 * mm, 24 * mm, 14 * mm, 16 * mm, 50 * mm]
 
-            # Reason: for cascade, reconstruct from the decisive stage; for
-            # legacy rows without metrics, fall back to a clear placeholder.
-            reason = ""
-            if isinstance(metrics, dict) and metrics.get("stages"):
-                stages = metrics.get("stages") or []
-                decisive = metrics.get("decisive_stage")
-                if decisive is not None and 0 <= decisive < len(stages):
-                    reason = stages[decisive].get("reason", "") or ""
-                reason = reason or "cascade NOK (see stage breakdown below)"
-            if not reason and not metrics:
-                reason = "details not recorded"
+    for case in nok_cases:
+        ts = case["timestamp"]
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        score = case["score"]
+        threshold = case["threshold"]
+        feature = case["feature"]
+        rule = case["decision_rule"] or "—"
+        metrics = case.get("metrics")
+        if isinstance(metrics, str):
+            metrics = _parse_metrics(metrics)
+        elif metrics is None:
+            metrics = {}
 
-            nok_rows.append([
-                _cell(ts_str), _cell(case["sku_name"]),
-                _cell(_feature_label(feature)), _cell(rule),
-                _cell(_fmt_score(score)), _cell(_fmt_threshold(threshold)),
-                _cell(reason),
-            ])
+        reason = _reason_for_case(metrics)
 
-            # Cascade: indented per-stage sub-rows.
-            if isinstance(metrics, dict) and metrics.get("stages"):
-                stage_rows = [[
-                    _cell("Stage", stage_cell_style),
-                    _cell("Model", stage_cell_style),
-                    _cell("Score", stage_cell_style),
-                    _cell("Threshold", stage_cell_style),
-                    _cell("Verdict", stage_cell_style),
-                    _cell("Reason", stage_cell_style),
-                ]]
-                for s in metrics["stages"]:
-                    stage_rows.append([
-                        _cell(f"  {s.get('feature', '?')}", stage_cell_style),
-                        _cell(s.get("model_version", "—"), stage_cell_style),
-                        _cell(_fmt_score(s.get("score")), stage_cell_style),
-                        _cell(_fmt_threshold(s.get("threshold")), stage_cell_style),
-                        _cell(s.get("verdict", "—"), stage_cell_style),
-                        _cell(s.get("reason", "") or "—", stage_cell_style),
-                    ])
-                sub = Table(stage_rows, colWidths=[28 * mm, 30 * mm, 14 * mm, 16 * mm, 16 * mm, 56 * mm])
-                sub.setStyle(TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-                    ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 2),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ]))
-                nok_rows.append([sub, "", "", "", "", "", ""])
+        nok_rows.append([
+            _cell(ts_str), _cell(case["sku_name"]),
+            _cell(_feature_label(feature)), _cell(rule),
+            _cell(_fmt_score(score)), _cell(_fmt_threshold(threshold)),
+            _cell(reason),
+        ])
 
-        nok_table = Table(nok_rows, colWidths=col_widths, repeatRows=1)
-        nok_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7f1d1d")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 8),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#fef2f2"), colors.white]),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#fca5a5")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
-        story.append(nok_table)
+        sub = _stage_subtable(metrics)
+        if sub is not None:
+            nok_rows.append([sub, "", "", "", "", "", ""])
+
+    nok_table = Table(nok_rows, colWidths=col_widths, repeatRows=1)
+    nok_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7f1d1d")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#fef2f2"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#fca5a5")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(nok_table)
 
     doc.build(story)
     return buffer.getvalue()

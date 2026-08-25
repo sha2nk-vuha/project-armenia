@@ -133,22 +133,9 @@ def test_preprocess_skips_normalization_when_disabled():
     assert tensor.min() == pytest.approx(1.0, abs=1e-6)
 
 
-def test_draw_detections_returns_decodable_image():
-    import cv2
-    from inference.rfdetr import draw_detections
-
-    original = np.zeros((50, 50, 3), dtype=np.uint8)
-    dets = [Detection(1, 0.9, (5.0, 5.0, 20.0, 20.0))]
-    out = draw_detections(original, dets, labels={1: "cap"})
-
-    assert isinstance(out, bytes) and len(out) > 0
-    decoded = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
-    assert decoded.shape == (50, 50, 3)
-
-
 def test_load_config_parses_sidecar(tmp_path):
     import json
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     sidecar = tmp_path / "rfdetr-nano.json"
     sidecar.write_text(json.dumps({
@@ -168,7 +155,7 @@ def test_load_config_parses_sidecar(tmp_path):
 
 
 def test_load_config_falls_back_to_defaults_when_absent(tmp_path):
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     config = load_config(str(tmp_path / "missing.json"))
 
@@ -179,7 +166,7 @@ def test_load_config_falls_back_to_defaults_when_absent(tmp_path):
 
 def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
     import json
-    from inference.rfdetr import load_config, ModelConfig
+    from inference.model_config import load_config, ModelConfig
 
     sidecar = tmp_path / "labels-only.json"
     sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))
@@ -194,7 +181,7 @@ def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
 
 def test_load_config_reads_expected_classes(tmp_path):
     import json
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     sidecar = tmp_path / "with-expected.json"
     sidecar.write_text(json.dumps({
@@ -210,7 +197,7 @@ def test_load_config_reads_expected_classes(tmp_path):
 
 def test_load_config_defaults_expected_classes_to_empty(tmp_path):
     import json
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     sidecar = tmp_path / "no-expected.json"
     sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))

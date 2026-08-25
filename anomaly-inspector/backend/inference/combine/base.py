@@ -11,17 +11,27 @@ docs/adr/0006.
 """
 from typing import Protocol, runtime_checkable
 
-OK = "ok"
-NOK = "not_ok"
+# Single spelling authority for Verdict strings lives in inference.verdict.
+from inference.verdict import NOT_OK as NOK
+from inference.verdict import OK
 
 
 @runtime_checkable
 class Combinator(Protocol):
+    """Reduces per-stage Verdicts to one cascade Verdict (see docs/adr/0006)."""
+
     name: str
     label: str
 
     def decisive(self, verdict: str) -> bool:
-        """True if `verdict` alone settles the cascade (enables short-circuit)."""
+        """True if `verdict` alone settles the cascade (enables short-circuit).
+
+        Args:
+            verdict: A stage Verdict that has just been evaluated.
+
+        Returns:
+            True when no later stage can change the outcome.
+        """
         ...
 
     def combine(self, verdicts: list[str]) -> str:
@@ -30,5 +40,11 @@ class Combinator(Protocol):
         Called with the verdicts actually evaluated; a short-circuited run passes
         only the stages that ran, which is why each operator must define its
         result on a partial list consistently with its decisive() rule.
+
+        Args:
+            verdicts: Verdicts of the stages that ran, in order.
+
+        Returns:
+            The combined cascade Verdict ("ok" or "not_ok").
         """
         ...

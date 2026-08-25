@@ -18,19 +18,12 @@ own predicted box to within ~0.005 in normalised coordinates. So a mask is
 decoded by sigmoid -> threshold -> resize to the original image, with no
 box-relative paste step.
 """
-import logging
-
 import cv2
 import numpy as np
 
 from inference.decision.base import Instance
 from inference.model_config import ModelConfig
-
-logger = logging.getLogger(__name__)
-
-
-def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x))
+from inference.rfdetr import query_probs, sigmoid, unnormalize_cxcywh
 
 
 def split_outputs(outputs: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -39,6 +32,17 @@ def split_outputs(outputs: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     Masks are the only rank-4 tensor; of the two rank-3 tensors, boxes are the
     one whose last dim is 4. Selecting structurally rather than positionally
     keeps the decode robust to output ordering across exports.
+
+    Args:
+        outputs: Raw model output tensors.
+
+    Returns:
+        Tuple of (logits, boxes, masks) arrays.
+
+    Raises:
+        ValueError: If no rank-4 mask output or no last-dim-4 box output is
+            found (the latter usually means a detection-only export was routed
+            here).
     """
     arrays = [np.asarray(o) for o in outputs]
     masks_idx = next((i for i, a in enumerate(arrays) if a.ndim == 4), None)
@@ -71,39 +75,40 @@ def decode_instances(
     Queries whose mask is empty after binarisation are dropped: a detection with
     no pixels cannot yield a centre, and carrying it forward would force every
     geometry rule to re-handle the same degenerate case.
+
+    Args:
+        outputs: Raw model output tensors.
+        orig_hw: Original image size as (height, width).
+        conf_threshold: Minimum confidence to keep an instance.
+        config: ModelConfig supplying mask_threshold and input geometry.
+
+    Returns:
+        Instances in original-image pixels with boolean full-resolution masks.
     """
     logits, boxes, masks = split_outputs(outputs)
     logits = logits.reshape(-1, logits.shape[-1])  # [Q, C]
     boxes = boxes.reshape(-1, 4)  # [Q, 4]
     masks = masks.reshape(-1, *masks.shape[-2:])  # [Q, h, w]
 
-    probs = _sigmoid(logits)
-    class_ids = probs.argmax(axis=1)
-    confidences = probs.max(axis=1)
+    class_ids, confidences = query_probs(logits)
 
     orig_h, orig_w = orig_hw
     instances: list[Instance] = []
     for q, (cls, conf) in enumerate(zip(class_ids, confidences)):
         if conf < conf_threshold:
             continue
-        binary = (_sigmoid(masks[q]) > config.mask_threshold).astype(np.uint8)
+        binary = (sigmoid(masks[q]) > config.mask_threshold).astype(np.uint8)
         if not binary.any():
             continue
         full = cv2.resize(binary, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
         mask = full.astype(bool)
         if not mask.any():
             continue
-        cx, cy, bw, bh = boxes[q]
         instances.append(
             Instance(
                 class_id=int(cls),
                 confidence=float(conf),
-                box=(
-                    float((cx - bw / 2) * orig_w),
-                    float((cy - bh / 2) * orig_h),
-                    float((cx + bw / 2) * orig_w),
-                    float((cy + bh / 2) * orig_h),
-                ),
+                box=unnormalize_cxcywh(boxes[q], orig_hw),
                 mask=mask,
             )
         )
@@ -127,6 +132,15 @@ def draw_instances_rgb(
 
     Returns an array rather than encoded bytes so a pipeline can composite a
     Decision Rule's annotations on top before a single final encode.
+
+    Args:
+        original_rgb: Frame to draw onto ([H,W,3] uint8).
+        instances: Decoded instances with boolean masks at image resolution.
+        labels: Class Catalog for caption text.
+        alpha: Mask tint opacity per instance.
+
+    Returns:
+        A new RGB array with tinted masks, outlines, and captions.
     """
     canvas = original_rgb.copy()
     for inst in instances:

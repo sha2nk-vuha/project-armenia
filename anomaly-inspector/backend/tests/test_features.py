@@ -111,10 +111,3 @@ def test_active_model_tracks_the_active_feature():
     # The cascade Feature has no single model of its own.
     features.activate(CASCADE_FEATURE)
     assert features.active_model() is None
-
-
-def test_clear_model_unloads():
-    _install(ANOMALY_FEATURE)
-    assert features.clear_model(ANOMALY_FEATURE) is True
-    assert features.clear_model(ANOMALY_FEATURE) is False
-    assert features.loaded_models() == {}

@@ -33,6 +33,7 @@ from inference.decision.base import (
     resolve_class,
 )
 from inference.decision.registry import register
+from inference.verdict import NOT_OK, OK
 
 CENTER_METHODS = [
     "min_enclosing_circle",
@@ -52,7 +53,14 @@ _FIT_REFINE_ITERS = 5
 
 
 def _mask_points(mask: np.ndarray) -> np.ndarray:
-    """Non-zero mask pixels as an OpenCV-style [N,1,2] int32 array of (x, y)."""
+    """Non-zero mask pixels as an OpenCV-style [N,1,2] int32 array of (x, y).
+
+    Args:
+        mask: Boolean mask at original-image resolution.
+
+    Returns:
+        Pixel coordinates (x, y) shaped for cv2 geometry functions.
+    """
     ys, xs = np.nonzero(mask)
     return np.stack([xs, ys], axis=1).reshape(-1, 1, 2).astype(np.int32)
 
@@ -74,6 +82,16 @@ def compute_center(mask: np.ndarray, method: str) -> tuple[float, float]:
       method that survives a mask covering just part of a ring-shaped print,
       where every centroid-style estimator is dragged off by the missing side.
       Meaningless on free-form artwork with no circular outer edge.
+
+    Args:
+        mask: Boolean mask at original-image resolution.
+        method: One of CENTER_METHODS.
+
+    Returns:
+        The estimated centre as (cx, cy) in pixel coordinates.
+
+    Raises:
+        ValueError: If the mask is empty or `method` is unknown.
     """
     import cv2
 
@@ -109,7 +127,14 @@ def compute_center(mask: np.ndarray, method: str) -> tuple[float, float]:
 
 
 def _fit_circle(points: np.ndarray) -> tuple[float, float, float]:
-    """Algebraic (Kasa) least-squares circle through `points` [N,2]."""
+    """Algebraic (Kasa) least-squares circle through `points` [N,2].
+
+    Args:
+        points: Boundary points as an [N,2] float array of (x, y).
+
+    Returns:
+        Fitted circle as (cx, cy, r); r clamped to >= 0.
+    """
     x, y = points[:, 0], points[:, 1]
     design = np.stack([x, y, np.ones_like(x)], axis=1)
     sol, *_ = np.linalg.lstsq(design, x**2 + y**2, rcond=None)
@@ -127,6 +152,12 @@ def _outer_envelope(mask: np.ndarray) -> np.ndarray:
     The quantile filter is what makes this work on a partial ring: where the
     print exists these points lie on its outer edge, while bins that only reach
     an interior boundary (the flat side of a crescent) fall short and are cut.
+
+    Args:
+        mask: Boolean mask at original-image resolution.
+
+    Returns:
+        Kept envelope points as an [N,2] float array of (x, y).
     """
     seed_x, seed_y = compute_center(mask, "min_enclosing_circle")
     ys, xs = np.nonzero(mask)
@@ -159,6 +190,15 @@ def fit_outer_circle(mask: np.ndarray) -> tuple[float, float, float]:
     It is *not* suitable for free-form artwork with no circular outer edge; on
     such a mask the fitted circle is arbitrary. Hence a selectable method rather
     than the default.
+
+    Args:
+        mask: Boolean mask at original-image resolution.
+
+    Returns:
+        Fitted design centre and radius as (cx, cy, r).
+
+    Raises:
+        ValueError: If too few boundary points survive the envelope filter.
     """
     points = _outer_envelope(mask)
     if len(points) < 3:
@@ -178,6 +218,12 @@ def enclosing_radius(mask: np.ndarray) -> float:
 
     Always used as the normalising scale, whichever centre method is selected,
     so changing how the centre is found never silently rescales the tolerance.
+
+    Args:
+        mask: Boolean mask at original-image resolution.
+
+    Returns:
+        Radius of the minimum enclosing circle in pixels.
     """
     import cv2
 
@@ -186,6 +232,12 @@ def enclosing_radius(mask: np.ndarray) -> float:
 
 
 class ConcentricityRule:
+    """OK while the target's offset from the reference stays in tolerance.
+
+    Measures centre-to-centre distance as a ratio of the reference's radius,
+    deviated from an optional per-SKU nominal (see `calibration`).
+    """
+
     name = "concentricity"
     label = "Concentric Placement"
     consumes = frozenset({KIND_MASKS})
@@ -250,6 +302,18 @@ class ConcentricityRule:
     )
 
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
+        """Measure the offset ratio and judge it against the tolerance.
+
+        Args:
+            ctx: Decision context; params name reference/target classes, the
+                max_offset_ratio tolerance, optional nominal_offset, and the
+                centre estimators per part.
+
+        Returns:
+            OK while |offset - nominal| <= tolerance, with metrics carrying
+            both pixel and dimensionless measurements plus overlay geometry;
+            fail-safe NOK when either class is missing or unmeasurable.
+        """
         labels = ctx.labels
         ref_id = resolve_class(ctx.params["reference_class"], labels)
         tgt_id = resolve_class(ctx.params["target_class"], labels)
@@ -277,7 +341,7 @@ class ConcentricityRule:
         ]
         if missing:
             return DecisionResult(
-                verdict="not_ok",
+                verdict=NOT_OK,
                 reason=f"not detected above {ctx.threshold:.2f} confidence: {', '.join(missing)}",
                 score=None,
                 score_label="Offset Ratio",
@@ -291,7 +355,7 @@ class ConcentricityRule:
         ref_radius = enclosing_radius(reference.mask)
         if ref_radius <= 0:
             return DecisionResult(
-                verdict="not_ok",
+                verdict=NOT_OK,
                 reason=f"{class_name(ref_id, labels)} mask has no measurable size",
                 score=None,
                 score_label="Offset Ratio",
@@ -366,7 +430,7 @@ class ConcentricityRule:
         ]
 
         return DecisionResult(
-            verdict="ok" if ok else "not_ok",
+            verdict=OK if ok else NOT_OK,
             reason=reason,
             score=deviation,
             score_label="Offset Deviation" if nominal else "Offset Ratio",

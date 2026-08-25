@@ -65,6 +65,8 @@ COLOR_NEUTRAL = (200, 200, 200)
 
 @dataclass
 class Point:
+    """A filled or hollow dot at (x, y) in original-image pixels."""
+
     x: float
     y: float
     color: tuple[int, int, int] = COLOR_NEUTRAL
@@ -74,6 +76,8 @@ class Point:
 
 @dataclass
 class Circle:
+    """A circle of radius `r` centred at (cx, cy) in original-image pixels."""
+
     cx: float
     cy: float
     r: float
@@ -83,6 +87,8 @@ class Circle:
 
 @dataclass
 class Line:
+    """A straight segment between two points in original-image pixels."""
+
     x1: float
     y1: float
     x2: float
@@ -93,6 +99,8 @@ class Line:
 
 @dataclass
 class Polygon:
+    """A polyline or closed polygon through `points`, in pixel coordinates."""
+
     points: list[tuple[float, float]]
     color: tuple[int, int, int] = COLOR_NEUTRAL
     thickness: int = 2
@@ -101,6 +109,8 @@ class Polygon:
 
 @dataclass
 class Text:
+    """A text label drawn with its anchor at (x, y) in pixel coordinates."""
+
     x: float
     y: float
     text: str
@@ -134,6 +144,11 @@ class ParamSpec:
     help: str | None = None
 
     def as_dict(self) -> dict:
+        """The JSON shape the GUI renders a control from.
+
+        Returns:
+            Dict of every ParamSpec field, ready to ship as rule metadata.
+        """
         return {
             "name": self.name,
             "label": self.label,
@@ -168,7 +183,13 @@ class DecisionContext:
 
 @dataclass
 class DecisionResult:
-    verdict: str  # "ok" | "not_ok"
+    """What one rule decided: the Verdict plus everything that explains it.
+
+    `metrics` and `reason` are persisted for report traceability;
+    `annotations` are declarative shapes rendered by inference.visualizer.
+    """
+
+    verdict: str  # Verdict.OK | Verdict.NOT_OK (inference.verdict)
     reason: str
     score: float | None = None
     score_label: str = ""
@@ -194,6 +215,12 @@ class Calibration:
 
 @runtime_checkable
 class DecisionRule(Protocol):
+    """The contract every pluggable post-processing step satisfies.
+
+    Rules are plain stateful-small objects registered at import; `consumes`
+    types them on decoded-output kinds so only compatible rules are offered.
+    """
+
     name: str
     label: str
     consumes: frozenset[str]
@@ -201,7 +228,16 @@ class DecisionRule(Protocol):
     # Rules without a per-SKU baseline leave this None and are not calibratable.
     calibration: Calibration | None
 
-    def evaluate(self, ctx: DecisionContext) -> DecisionResult: ...
+    def evaluate(self, ctx: DecisionContext) -> DecisionResult:
+        """Judge one inspection's decoded output under its parameters.
+
+        Args:
+            ctx: Decision context (decoded output, Threshold, params, catalog).
+
+        Returns:
+            DecisionResult with the Verdict, metrics, and overlay geometry.
+        """
+        ...
 
 
 # ── Class-reference resolution ──────────────────────────────────────────────
@@ -217,6 +253,17 @@ def resolve_class(ref: Any, labels: dict[int, str]) -> int:
     Config and GUI carry class *names*, so a retrain that reorders classes keeps
     working. A name the catalog lacks raises rather than silently resolving to
     the wrong object — a wrong class reference inverts a verdict invisibly.
+
+    Args:
+        ref: Class reference — an id, a numeric string, or a catalog name.
+        labels: The loaded model's Class Catalog (id -> name).
+
+    Returns:
+        The resolved class id.
+
+    Raises:
+        ClassNotFound: If the reference is malformed or names a class the
+            catalog does not contain.
     """
     if isinstance(ref, bool):
         raise ClassNotFound(f"Invalid class reference: {ref!r}")
@@ -234,4 +281,13 @@ def resolve_class(ref: Any, labels: dict[int, str]) -> int:
 
 
 def class_name(class_id: int, labels: dict[int, str]) -> str:
+    """Human label for a class id.
+
+    Args:
+        class_id: Numeric class id from a decode.
+        labels: The loaded model's Class Catalog (id -> name).
+
+    Returns:
+        The catalog label, or the id as a string when unlabelled.
+    """
     return labels.get(class_id, str(class_id))

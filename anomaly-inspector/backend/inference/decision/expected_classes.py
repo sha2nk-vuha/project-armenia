@@ -16,9 +16,12 @@ from inference.decision.base import (
     resolve_class,
 )
 from inference.decision.registry import register
+from inference.verdict import NOT_OK, OK
 
 
 class ExpectedClassesRule:
+    """OK only when every Expected Class is detected at/above the Threshold."""
+
     name = "expected_classes"
     label = "Expected Classes Present"
     consumes = frozenset({KIND_DETECTIONS})
@@ -34,6 +37,16 @@ class ExpectedClassesRule:
     calibration = None
 
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
+        """Report which Expected Classes are missing from the detections.
+
+        Args:
+            ctx: Decision context; `params["expected_classes"]` names the
+                classes (by catalog name or id) that must be present.
+
+        Returns:
+            OK when every Expected Class has a detection at/above the
+            Threshold; NOK naming the missing classes otherwise.
+        """
         expected = [
             resolve_class(ref, ctx.labels)
             for ref in (ctx.params.get("expected_classes") or [])
@@ -52,7 +65,7 @@ class ExpectedClassesRule:
             reason = f"all {len(expected)} expected class(es) present"
 
         return DecisionResult(
-            verdict="not_ok" if missing else "ok",
+            verdict=NOT_OK if missing else OK,
             reason=reason,
             score=None,  # no single scalar for a presence check
             score_label="",

@@ -11,9 +11,10 @@ from inference.combine.base import Combinator
 from inference.pipeline import (
     InferenceResult,
     StageResult,
-    _PipelineBase,
+    PipelineBase,
     labelled_images,
 )
+from inference.verdict import NOT_OK, OK, SKIPPED, stage_metrics_row
 
 
 @dataclass
@@ -21,7 +22,7 @@ class CascadeStage:
     """One configured stage: a built sub-pipeline plus how to run it."""
 
     feature: str
-    pipeline: _PipelineBase
+    pipeline: PipelineBase
     rule: str
     threshold: float
     params: dict
@@ -52,7 +53,11 @@ class CascadePipeline:
 
     @property
     def model_version(self) -> str:
-        """A composite identifier naming the ordered member models."""
+        """A composite identifier naming the ordered member models.
+
+        Returns:
+            String like 'cascade[anomaly_detection:v1, presence_absence:v2]'.
+        """
         return "cascade[" + ", ".join(
             f"{s.feature}:{s.pipeline.model_version}" for s in self.stages
         ) + "]"
@@ -64,6 +69,21 @@ class CascadePipeline:
         rule_name: str | None = None,
         rule_params: dict | None = None,
     ) -> InferenceResult:
+        """Run every stage on one image and reduce their Verdicts to one.
+
+        The `threshold`/`rule_name`/`rule_params` arguments are accepted for
+        interface parity and ignored: each stage carries its own.
+
+        Args:
+            image_bytes: Encoded image every stage inspects.
+            threshold: Ignored (kept for pipeline interface parity).
+            rule_name: Ignored; stages name their own Decision Rules.
+            rule_params: Ignored; stages carry their own resolved params.
+
+        Returns:
+            InferenceResult whose `stages` list records each stage's Verdict
+            (or SKIPPED) and whose metrics carry the per-stage breakdown.
+        """
         stage_results: list[StageResult] = []
         evaluated_verdicts: list[str] = []
         decided = False
@@ -75,7 +95,7 @@ class CascadePipeline:
                     StageResult(
                         feature=stage.feature,
                         decision_rule=stage.rule,
-                        verdict="skipped",
+                        verdict=SKIPPED,
                         evaluated=False,
                         reason="not evaluated (cascade already decided)",
                     )
@@ -118,19 +138,16 @@ class CascadePipeline:
                 "short_circuit": self.short_circuit,
                 "decisive_stage": decisive_stage,
                 "stages": [
-                    {
-                        "feature": s.feature,
-                        "rule": s.decision_rule,
-                        "verdict": s.verdict,
-                        "evaluated": s.evaluated,
-                        "score": s.score,
-                        "reason": s.reason,
-                        # Per-stage threshold + model version so a customer-facing
-                        # report can explain, per stage, under what tolerance and
-                        # with which model the verdict was reached.
-                        "threshold": stage.threshold,
-                        "model_version": stage.pipeline.model_version,
-                    }
+                    stage_metrics_row(
+                        feature=s.feature,
+                        decision_rule=s.decision_rule,
+                        verdict=s.verdict,
+                        evaluated=s.evaluated,
+                        score=s.score,
+                        reason=s.reason,
+                        threshold=stage.threshold,
+                        model_version=stage.pipeline.model_version,
+                    )
                     for s, stage in zip(stage_results, self.stages)
                 ],
             },
@@ -143,6 +160,13 @@ def _decisive_stage(stage_results: list[StageResult], verdict: str) -> int | Non
 
     On a NOK it is the first failing stage; on an OK under OR it is the first
     passing stage; otherwise there is no single decisive stage.
+
+    Args:
+        stage_results: Per-stage outcomes in run order.
+        verdict: The combined cascade Verdict.
+
+    Returns:
+        Index of the decisive stage, or None when none applies.
     """
     for i, s in enumerate(stage_results):
         if s.evaluated and s.verdict == verdict:
@@ -156,10 +180,21 @@ def _cascade_reason(
     stage_results: list[StageResult],
     decisive: int | None,
 ) -> str:
+    """Explain in one line why the cascade reached its Verdict.
+
+    Args:
+        combinator: The Combinator that produced `verdict`.
+        verdict: The combined cascade Verdict.
+        stage_results: Per-stage outcomes in run order.
+        decisive: Index of the decisive stage, if any.
+
+    Returns:
+        Human-readable reason string explaining the outcome.
+    """
     evaluated = [s for s in stage_results if s.evaluated]
-    if decisive is not None and verdict == "not_ok":
+    if decisive is not None and verdict == NOT_OK:
         s = stage_results[decisive]
         return f"stage {decisive + 1} ({s.feature}/{s.decision_rule}) NOK: {s.reason}"
-    if verdict == "ok":
+    if verdict == OK:
         return f"all {len(evaluated)} evaluated stage(s) passed ({combinator.name.upper()})"
     return f"no stage passed ({combinator.name.upper()})"

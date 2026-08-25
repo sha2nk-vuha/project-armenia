@@ -8,7 +8,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from database.models import Base
 from database.db import get_db
-import inference.engine as _engine
 import inference.features as _features
 
 
@@ -24,7 +23,6 @@ def client():
     from main import app
 
     # Reset model + active-Feature state before each test to avoid leakage
-    _engine._current_session = None
     _features.reset()
 
     test_engine = create_engine(
@@ -48,8 +46,7 @@ def client():
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
-    # Reset model session after each test
-    _engine._current_session = None
+    # Reset model state after each test
     _features.reset()
 
 
@@ -253,7 +250,7 @@ def _mock_detector_session(favored_class=0, num_classes=3):
 def presence_active(client):
     """Activate Presence/Absence with a mock detector, via the real endpoint."""
     from inference.engine import ModelSession
-    from inference.rfdetr import ModelConfig
+    from inference.model_config import ModelConfig
 
     sess = ModelSession(
         session=_mock_detector_session(favored_class=0),
@@ -308,7 +305,7 @@ def test_presence_infer_returns_feature_shaped_payload(client, presence_active):
 
 def test_presence_infer_nok_when_gasket_absent(client):
     from inference.engine import ModelSession
-    from inference.rfdetr import ModelConfig
+    from inference.model_config import ModelConfig
 
     sess = ModelSession(
         session=_mock_detector_session(favored_class=1),  # no-gasket

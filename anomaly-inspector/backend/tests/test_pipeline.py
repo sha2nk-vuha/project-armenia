@@ -67,7 +67,7 @@ def _mock_detector_session(favored_class=1, num_classes=2):
 
 def _presence_pipeline(expected_classes, favored_class=1):
     from inference.pipeline import PresenceAbsencePipeline
-    from inference.rfdetr import ModelConfig
+    from inference.model_config import ModelConfig
 
     model = ModelSession(
         session=_mock_detector_session(favored_class),

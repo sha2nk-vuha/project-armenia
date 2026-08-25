@@ -1,7 +1,9 @@
 import logging
 import os
 import tempfile
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -10,45 +12,51 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ModelSession:
+    """One loaded model plus everything needed to run it.
+
+    `session` is whatever the chosen runtime returns (onnxruntime or OpenVINO);
+    `input_shape`/`input_name` describe the expected input tensor, and
+    map_idx/score_idx point at the anomaly-map and scalar-score outputs within
+    the raw output list (see `_get_output_plan`).
+    """
+
     session: object
     runtime: str
     input_name: str
     input_shape: tuple[int, int]
     model_version: str
-    output_names: list[str] = field(default_factory=list)
     map_idx: int = 0
     # Index of the scalar image-score output. None → derive score from the
     # anomaly map's maximum (Anomalib's image score == max pixel score).
     score_idx: int | None = 1
 
 
-_current_session: ModelSession | None = None
-
-
-def get_session() -> ModelSession | None:
-    return _current_session
-
-
-def load_model_from_path(path: str, model_version: str) -> ModelSession:
-    """Load an .onnx model from a filesystem path (e.g. the bundled default)."""
-    with open(path, "rb") as f:
-        model_bytes = f.read()
-    return load_model(model_bytes, str(path), model_version)
-
-
 def build_session(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
-    """Build a ModelSession without making it the global current one.
+    """Load an .onnx payload into a ModelSession.
 
-    Single-Feature mode uses `load_model` (which sets the global); a Cascade
-    builds a session per member model and holds them in its own store, so the
-    session-building core is factored out here (see docs/adr/0006).
+    The single way a model enters the app: callers hand over raw .onnx bytes
+    (an upload or a bundled file path) and receive an inert session. Nothing
+    here is global — single-Feature mode keeps its session in the per-Feature
+    store (inference/features.py); a Cascade builds one per member model and
+    holds them in its own store (see docs/adr/0006, 0007).
+
+    Args:
+        model_bytes: Raw contents of an .onnx export.
+        filename: Original filename; used only to reject non-.onnx uploads.
+        model_version: Version string recorded on the session for reporting.
+
+    Returns:
+        A ModelSession ready to run via run_inference_on / run_raw.
+
+    Raises:
+        ValueError: If `filename` does not end in ".onnx".
     """
     if not filename.endswith(".onnx"):
         raise ValueError(f"Only .onnx files are accepted; got: {filename!r}")
 
     session, runtime = _select_runtime(model_bytes)
     input_name, input_shape = _get_onnx_meta(session) if runtime != "openvino" else _get_openvino_meta(session)
-    output_names, map_idx, score_idx = _get_output_plan(session, runtime)
+    map_idx, score_idx = _get_output_plan(session, runtime)
 
     logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
     return ModelSession(
@@ -57,27 +65,22 @@ def build_session(model_bytes: bytes, filename: str, model_version: str) -> Mode
         input_name=input_name,
         input_shape=input_shape,
         model_version=model_version,
-        output_names=output_names,
         map_idx=map_idx,
         score_idx=score_idx,
     )
 
 
-def build_session_from_path(path: str, model_version: str) -> ModelSession:
-    """Build a session from a filesystem path without setting the global."""
-    with open(path, "rb") as f:
-        return build_session(f.read(), str(path), model_version)
-
-
-def load_model(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
-    """Build a session and make it the global current one (single-Feature mode)."""
-    global _current_session
-    _current_session = build_session(model_bytes, filename, model_version)
-    return _current_session
-
-
 def _select_runtime(model_bytes: bytes) -> tuple[object, str]:
-    """Try CUDA → OpenVINO → CPU in priority order."""
+    """Pick the best available runtime for these bytes.
+
+    Tries CUDA, then OpenVINO, then plain CPU onnxruntime.
+
+    Args:
+        model_bytes: Raw .onnx bytes to load.
+
+    Returns:
+        Tuple of (opaque runtime session object, runtime name).
+    """
     import onnxruntime as ort
 
     # 1. CUDA
@@ -88,23 +91,23 @@ def _select_runtime(model_bytes: bytes) -> tuple[object, str]:
     try:
         session = _load_openvino(model_bytes)
         return session, "openvino"
-    except Exception as e:
+    except (ImportError, ModuleNotFoundError, RuntimeError, OSError) as e:
         logger.warning("OpenVINO runtime unavailable: %s — falling back to CPU", e)
 
     # 3. CPU
     return _load_onnx_session(model_bytes, ["CPUExecutionProvider"]), "cpu"
 
 
-def run_inference(tensor: np.ndarray) -> tuple[np.ndarray, float]:
-    """Returns (anomaly_map [1,1,H,W] float32, pred_score float)."""
-    sess = _current_session
-    if sess is None:
-        raise RuntimeError("No model loaded. Call load_model() first.")
-    return run_inference_on(sess, tensor)
-
-
 def run_inference_on(sess: "ModelSession", tensor: np.ndarray) -> tuple[np.ndarray, float]:
-    """Run a specific session's model. Returns (anomaly_map [1,1,H,W], pred_score)."""
+    """Run one anomaly-model forward pass.
+
+    Args:
+        sess: The session whose model to run.
+        tensor: Preprocessed input tensor [1,3,H,W] float32.
+
+    Returns:
+        Tuple of (anomaly_map [1,1,H,W] float32, scalar pred_score).
+    """
     outputs = run_raw(sess, tensor)
     return _extract_outputs(outputs, sess.map_idx, sess.score_idx)
 
@@ -114,6 +117,13 @@ def run_raw(sess: "ModelSession", tensor: np.ndarray) -> list:
 
     Feature pipelines that interpret outputs themselves (e.g. detectors) use this
     instead of run_inference_on, which is specific to the anomaly-map layout.
+
+    Args:
+        sess: The session whose model to run.
+        tensor: Preprocessed input tensor [1,3,H,W] float32.
+
+    Returns:
+        Raw output tensors as a list, in the model's port order.
     """
     if sess.runtime == "openvino":
         return _run_openvino_raw(sess.session, tensor)
@@ -122,32 +132,45 @@ def run_raw(sess: "ModelSession", tensor: np.ndarray) -> list:
 
 # ── Private helpers ──────────────────────────────────────────────────────────
 
-def _load_onnx_session(model_bytes: bytes, providers: list[str]) -> object:
-    import onnxruntime as ort
+@contextmanager
+def _temp_onnx_file(model_bytes: bytes) -> Iterator[str]:
+    """Yield a temp .onnx path for model_bytes, cleaned up afterwards.
 
+    Centralizes the NamedTemporaryFile boilerplate shared by the ONNX and
+    OpenVINO loaders so the DRY principle holds and cleanup is consistent.
+
+    Args:
+        model_bytes: Raw .onnx bytes to spill to disk for runtime loaders.
+
+    Yields:
+        Filesystem path to the temp file (caller must not unlink it).
+    """
     with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
         f.write(model_bytes)
         tmp_path = f.name
     try:
-        return ort.InferenceSession(tmp_path, providers=providers)
+        yield tmp_path
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _load_onnx_session(model_bytes: bytes, providers: list[str]) -> object:
+    import onnxruntime as ort
+
+    with _temp_onnx_file(model_bytes) as tmp_path:
+        return ort.InferenceSession(tmp_path, providers=providers)
 
 
 def _load_openvino(model_bytes: bytes) -> object:
     from openvino.runtime import Core  # raises ImportError/ModuleNotFoundError if unavailable
 
     core = Core()
-    with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
-        f.write(model_bytes)
-        tmp_path = f.name
-    try:
+    with _temp_onnx_file(model_bytes) as tmp_path:
         model = core.read_model(tmp_path)
-        compiled = core.compile_model(model, "CPU")
-    finally:
-        os.unlink(tmp_path)
-
-    return compiled
+        return core.compile_model(model, "CPU")
 
 
 def _parse_spatial_dim(d, fallback: int = 392) -> int:
@@ -156,6 +179,14 @@ def _parse_spatial_dim(d, fallback: int = 392) -> int:
     The default 392 (= 28 × 14) matches the DINOv2-backbone (patch size 14)
     Dinomaly export, whose anomaly map is emitted at 392×392. Feeding the model
     its native resolution keeps inference closest to training.
+
+    Args:
+        d: A raw dimension entry from the runtime's metadata, possibly a
+            string or symbolic marker.
+        fallback: Dimension to use when `d` is symbolic, dynamic, or unparsable.
+
+    Returns:
+        A concrete positive spatial dimension.
     """
     try:
         v = int(d)
@@ -174,15 +205,22 @@ def _get_onnx_meta(session) -> tuple[str, tuple[int, int]]:
 
 
 def _ov_dims(partial_shape) -> tuple:
-    """Convert an OpenVINO PartialShape to a tuple of ints, using -1 for dynamic
-    dimensions. Reading `.shape` directly raises on dynamic-shaped models, so we
-    inspect the partial shape and let callers apply fallbacks for -1.
+    """Convert an OpenVINO PartialShape to a tuple of ints.
+
+    Reading `.shape` directly raises on dynamic-shaped models, so we inspect
+    the partial shape and let callers apply fallbacks for -1.
+
+    Args:
+        partial_shape: OpenVINO PartialShape to read.
+
+    Returns:
+        One int per dimension; -1 marks a dynamic dimension.
     """
     dims = []
     for d in partial_shape:
         try:
             dims.append(int(d.get_length()) if d.is_static else -1)
-        except Exception:
+        except (AttributeError, TypeError, ValueError, RuntimeError):
             dims.append(-1)
     return tuple(dims)
 
@@ -195,7 +233,15 @@ def _get_openvino_meta(compiled_model) -> tuple[str, tuple[int, int]]:
 
 
 def _run_openvino_raw(compiled_model, tensor: np.ndarray) -> list:
-    """Run the OpenVINO model and return outputs as a list in port order."""
+    """Run the compiled OpenVINO model.
+
+    Args:
+        compiled_model: Compiled OpenVINO model returned by Core.compile_model.
+        tensor: Preprocessed input tensor [1,3,H,W] float32.
+
+    Returns:
+        Raw output tensors as a list, in port order.
+    """
     results = compiled_model([tensor])
     return [results[compiled_model.output(i)] for i in range(len(compiled_model.outputs))]
 
@@ -206,9 +252,14 @@ def _classify_outputs(specs: list[tuple[str, tuple]]) -> tuple[int, int | None]:
     Anomalib ONNX exports vary by version and may emit anomaly_map, pred_score,
     pred_label, and pred_mask in any order. Select by name hint, falling back to
     shape: the anomaly map is the highest-dimensional output; the score is a
-    scalar output that is neither a label nor a mask. Returns (map_idx,
-    score_idx); score_idx is None when no scalar score exists (derive from the
-    map maximum).
+    scalar output that is neither a label nor a mask.
+
+    Args:
+        specs: (name, shape-tuple) pairs for every model output.
+
+    Returns:
+        Tuple of (map_idx, score_idx). score_idx is None when no scalar score
+        exists; callers then derive the score from the anomaly map maximum.
     """
     # anomaly map — prefer an explicit name, else the most-dimensional output
     map_idx = next(
@@ -238,11 +289,18 @@ def _classify_outputs(specs: list[tuple[str, tuple]]) -> tuple[int, int | None]:
     return map_idx, score_idx
 
 
-def _get_output_plan(session, runtime: str) -> tuple[list[str], int, int | None]:
+def _get_output_plan(session, runtime: str) -> tuple[int, int | None]:
     """Inspect model outputs and decide which are the anomaly map and score.
 
     Defensive: if the outputs cannot be inspected (e.g. a mocked session in
     tests), fall back to the conventional map=#0, score=#1 layout.
+
+    Args:
+        session: Runtime session whose outputs are inspected by name and shape.
+        runtime: Which runtime produced the session ("openvino" or other).
+
+    Returns:
+        Tuple of (map_idx, score_idx); see _classify_outputs.
     """
     try:
         if runtime == "openvino":
@@ -252,25 +310,34 @@ def _get_output_plan(session, runtime: str) -> tuple[list[str], int, int | None]
         if not specs:
             raise ValueError("model exposes no outputs")
 
-        names = [s[0] for s in specs]
         map_idx, score_idx = _classify_outputs(specs)
         logger.info("Model outputs: %s", specs)
         logger.info(
             "Output plan: anomaly_map=#%d (%s), pred_score=%s",
             map_idx,
-            names[map_idx],
-            "max(anomaly_map)" if score_idx is None else f"#{score_idx} ({names[score_idx]})",
+            specs[map_idx][0],
+            "max(anomaly_map)" if score_idx is None else f"#{score_idx} ({specs[score_idx][0]})",
         )
-        return names, map_idx, score_idx
-    except Exception as e:
+        return map_idx, score_idx
+    except (AttributeError, ValueError, IndexError, KeyError, TypeError, RuntimeError) as e:
         logger.warning(
             "Could not classify model outputs (%s); defaulting to map=#0, score=#1", e
         )
-        return [], 0, 1
+        return 0, 1
 
 
 def _extract_outputs(outputs: list, map_idx: int, score_idx: int | None) -> tuple[np.ndarray, float]:
-    """Pull the anomaly map and a scalar image score from the raw model outputs."""
+    """Pull the anomaly map and a scalar image score from raw model outputs.
+
+    Args:
+        outputs: Raw output tensors in the model's port order.
+        map_idx: Index of the anomaly-map output.
+        score_idx: Index of the scalar score output, or None to derive the
+            score from the anomaly map maximum.
+
+    Returns:
+        Tuple of (anomaly_map [1,1,H,W] float32, pred_score float).
+    """
     anomaly_map = np.asarray(outputs[map_idx], dtype=np.float32)
     if score_idx is not None and score_idx < len(outputs):
         raw = np.asarray(outputs[score_idx]).squeeze()

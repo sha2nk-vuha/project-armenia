@@ -13,10 +13,16 @@ from datetime import datetime, timezone
 
 
 class Base(DeclarativeBase):
-    pass
+    """SQLAlchemy declarative base for the inspector's schema."""
 
 
 class Inspection(Base):
+    """One recorded inspection: which Feature ran, what it decided, and why.
+
+    A row is immutable evidence for stats and customer reports; per-SKU
+    configuration lives in SkuCalibration instead.
+    """
+
     __tablename__ = "inspections"
 
     id = Column(Integer, primary_key=True, autoincrement=True)

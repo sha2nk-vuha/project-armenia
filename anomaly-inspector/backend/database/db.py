@@ -1,6 +1,9 @@
+from collections.abc import Iterator
 from pathlib import Path
+
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
 from .models import Base
 
 _DB_PATH = Path(__file__).parent.parent / "inspections.db"
@@ -11,6 +14,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db() -> None:
+    """Create the schema and bring any prior-version database up to date.
+
+    Idempotent and crash-safe: safe to run on every startup.
+    """
     # Upgrade a legacy table (NOT NULL score/images) before create_all so
     # Presence/Absence records with NULL score/images can be stored. The rebuild
     # is split by SQLite's DDL limits, so make it crash-safe: rename aside, let
@@ -33,6 +40,9 @@ def _rename_legacy_if_needed(conn) -> None:
 
     No-op when there is nothing to migrate, or when a prior interrupted run
     already left an `inspections_legacy` to be resumed by the copy step.
+
+    Args:
+        conn: Open transaction connection on the app engine.
     """
     if _table_columns(conn, "inspections_legacy"):
         return  # resume in progress — leave it for _copy_from_legacy_if_present
@@ -59,6 +69,9 @@ def _copy_from_legacy_if_present(conn) -> None:
     name (new columns like `feature` are back-filled by their defaults).
     `INSERT OR IGNORE` keeps this safe to re-run if a previous copy was
     interrupted before the drop.
+
+    Args:
+        conn: Open transaction connection on the app engine.
     """
     legacy_cols = _table_columns(conn, "inspections_legacy")
     if not legacy_cols:
@@ -84,6 +97,9 @@ def _add_missing_columns(conn) -> None:
     create_all will not ALTER an existing table, so add columns a prior-version
     DB is missing and apply in-place renames. Every step is guarded on the
     current PRAGMA, so this is idempotent and safe to re-run.
+
+    Args:
+        conn: Open transaction connection on the app engine.
     """
     cols = {row[1] for row in conn.execute(text("PRAGMA table_info(inspections)"))}
     if "customer_name" not in cols:
@@ -106,7 +122,8 @@ def _add_missing_columns(conn) -> None:
             conn.execute(text(f"ALTER TABLE inspections ADD COLUMN {name} TEXT"))
 
 
-def get_db():
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency yielding a request-scoped database session."""
     db = SessionLocal()
     try:
         yield db

@@ -1,3 +1,10 @@
+"""Rendering for inspection visualisations.
+
+Heatmap/segmentation compositing for Anomaly Detection, plus the single
+renderer that turns Decision Rules' declarative annotations into drawn
+geometry. Every JPEG in the app is encoded by `encode_jpeg` so quality and
+colour handling stay consistent.
+"""
 import cv2
 import numpy as np
 
@@ -15,6 +22,14 @@ def generate_heatmap(
     Uses a fixed [0,1]→[0,255] scale, NOT per-image min-max. Per-image
     normalisation would stretch a clean image's narrow score range across the
     full colour map and make every pixel look anomalous.
+
+    Args:
+        anomaly_map: Float map already normalised to [0,1]; [1,1,H,W] or [H,W].
+        original_rgb: Frame to blend onto ([H,W,3] uint8).
+        alpha: Heatmap opacity in the blend.
+
+    Returns:
+        JPEG bytes of the jet-coloured heatmap over the original.
     """
     amap = anomaly_map.squeeze().astype(np.float32)
     amap_norm = (np.clip(amap, 0.0, 1.0) * 255).astype(np.uint8)
@@ -26,8 +41,7 @@ def generate_heatmap(
     original_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
     blended = cv2.addWeighted(original_bgr, 1.0 - alpha, heatmap_bgr, alpha, 0)
 
-    _, buf = cv2.imencode(".jpg", blended, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return buf.tobytes()
+    return encode_jpeg(blended)
 
 
 def generate_segmentation(
@@ -37,10 +51,16 @@ def generate_segmentation(
     anomaly_map: float32 [1,1,H,W] or [H,W], already normalised to [0,1]
         (Anomalib bakes normalisation into the exported graph).
     original_rgb: uint8 [H,W,3]
-    threshold: float in [0,1] — pixels scoring above this are flagged as defects.
-        Operates on the same normalised scale as the image-level pred_score, so
-        the segmentation agrees with the OK/NOT OK verdict.
-    Returns JPEG bytes of original with red contour + semi-transparent defect overlay.
+    Args:
+        anomaly_map: Float map already normalised to [0,1]; [1,1,H,W] or [H,W].
+        original_rgb: Frame to overlay ([H,W,3] uint8).
+        threshold: Cut-off in [0,1] — pixels scoring above it are defects.
+            Operates on the same normalised scale as the image-level pred_score,
+            so the segmentation agrees with the OK/NOK Verdict.
+
+    Returns:
+        JPEG bytes of the original with red contours and a semi-transparent
+        defect overlay.
     """
     amap = np.clip(anomaly_map.squeeze().astype(np.float32), 0.0, 1.0)
 
@@ -57,8 +77,7 @@ def generate_segmentation(
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(result_bgr, contours, -1, (0, 0, 255), 2)
 
-    _, buf = cv2.imencode(".jpg", result_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return buf.tobytes()
+    return encode_jpeg(result_bgr)
 
 
 def render_annotations(base_rgb: np.ndarray, annotations: list) -> np.ndarray:
@@ -66,7 +85,14 @@ def render_annotations(base_rgb: np.ndarray, annotations: list) -> np.ndarray:
 
     Rules return geometry (`Circle`, `Line`, `Point`, `Polygon`, `Text`) rather
     than rendered bytes, so drawing style lives here and stays consistent across
-    rules. Returns a new RGB array; the caller encodes it.
+    rules.
+
+    Args:
+        base_rgb: Canvas to draw onto ([H,W,3] uint8).
+        annotations: Declarative shapes produced by a Decision Rule.
+
+    Returns:
+        A new RGB array; empty annotation lists return the frame unchanged.
     """
     from inference.decision.base import Circle, Line, Point, Polygon, Text
 
@@ -75,6 +101,14 @@ def render_annotations(base_rgb: np.ndarray, annotations: list) -> np.ndarray:
     canvas = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2BGR).copy()
 
     def bgr(color: tuple[int, int, int]) -> tuple[int, int, int]:
+        """OpenCV wants BGR; rules speak RGB.
+
+        Args:
+            color: RGB tuple as rules declare it.
+
+        Returns:
+            The same colour as a BGR tuple for OpenCV drawing calls.
+        """
         r, g, b = color
         return (b, g, r)
 
@@ -108,7 +142,18 @@ def render_annotations(base_rgb: np.ndarray, annotations: list) -> np.ndarray:
 
 
 def encode_jpeg(image_rgb: np.ndarray, quality: int = 85) -> bytes:
-    """Encode an RGB image as JPEG bytes."""
+    """Encode an RGB image as JPEG bytes.
+
+    The single encode path for every visualisation the app produces, so JPEG
+    quality policy lives here alone.
+
+    Args:
+        image_rgb: Image to encode ([H,W,3] uint8).
+        quality: JPEG quality passed to OpenCV.
+
+    Returns:
+        JPEG-encoded bytes.
+    """
     bgr_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
     _, buf = cv2.imencode(".jpg", bgr_img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes()

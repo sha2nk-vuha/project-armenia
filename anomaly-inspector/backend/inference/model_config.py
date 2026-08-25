@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +49,12 @@ class ModelConfig:
 
     @property
     def expected_classes(self) -> list:
-        """Back-compat view of the Expected Classes rule's default param."""
+        """Back-compat view of the Expected Classes rule's default param.
+
+    Returns:
+        List of Expected Class ids from the rule_params defaults; empty when
+        none configured.
+    """
         return self.rule_params.get("expected_classes", {}).get("expected_classes", [])
 
 
@@ -54,6 +62,12 @@ def sidecar_path(model_path: str) -> str:
     """The sidecar JSON path for a model: same directory and stem, `.json`.
 
     e.g. `model/rfdetr-nano.onnx` -> `model/rfdetr-nano.json`.
+
+    Args:
+        model_path: Filesystem path of the .onnx model.
+
+    Returns:
+        Path of the sidecar JSON beside it.
     """
     return str(Path(model_path).with_suffix(".json"))
 
@@ -67,6 +81,12 @@ def load_config(path: str) -> ModelConfig:
 
     Back-compat: a top-level `expected_classes` from the pre-Decision-Rule
     sidecar format is mapped into the Expected Classes rule's params.
+
+    Args:
+        path: Sidecar JSON path; may not exist.
+
+    Returns:
+        Parsed ModelConfig, or bare defaults when the file is absent.
     """
     p = Path(path)
     if not p.is_file():
@@ -76,32 +96,69 @@ def load_config(path: str) -> ModelConfig:
     return config_from_dict(json.loads(p.read_text()))
 
 
+class _SidecarSchema(BaseModel):
+    """Validated shape of a sidecar JSON (trust boundary: uploaded file)."""
+
+    labels: dict[str, str] = Field(default_factory=dict)
+    input_size: tuple[int, int] | None = None
+    mean: tuple[float, float, float] | None = None
+    std: tuple[float, float, float] | None = None
+    normalize: bool = True
+    mask_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    default_rule: str | None = None
+    rule_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    expected_classes: list[int] | None = None  # legacy top-level
+
+    model_config = {"extra": "ignore"}
+
+
 def config_from_dict(data: dict) -> ModelConfig:
     """Build a ModelConfig from an already-parsed sidecar dict.
 
     Shared by `load_config` (bundled sidecar files) and model upload (a sidecar
     sent alongside the .onnx), so both honour the same defaults and back-compat.
+    The sidecar JSON is a trust boundary (uploaded file) and is validated via
+    Pydantic; invalid fields are logged and fall back to safe defaults rather
+    than failing the upload, with strict mask_threshold bounds enforced.
+
+    Args:
+        data: Parsed sidecar JSON (possibly partial).
+
+    Returns:
+        ModelConfig with unset fields falling back to RF-DETR defaults.
     """
     defaults = ModelConfig()
-    labels = {int(k): str(v) for k, v in data.get("labels", {}).items()}
-    input_size = data.get("input_size")
-    mean = data.get("mean")
-    std = data.get("std")
+    try:
+        parsed = _SidecarSchema.model_validate(data)
+    except ValidationError as exc:
+        logger.warning("Sidecar validation failed (%s); using defaults for invalid fields: %s", exc.errors()[0]["msg"] if exc.errors() else exc, data)
+        # Fall back to lenient partial parse for back-compat: coerce what we can
+        parsed = _SidecarSchema.model_validate({})
+        # Preserve raw rule_params/labels that are at least dict-typed
+        if isinstance(data.get("rule_params"), dict):
+            parsed = parsed.model_copy(update={"rule_params": {k: dict(v) for k, v in data["rule_params"].items() if isinstance(v, dict)}})
+        if isinstance(data.get("labels"), dict):
+            parsed = parsed.model_copy(update={"labels": {str(k): str(v) for k, v in data["labels"].items()}})
 
-    rule_params = {k: dict(v) for k, v in (data.get("rule_params") or {}).items()}
-    legacy_expected = data.get("expected_classes")
+    labels = {int(k): str(v) for k, v in parsed.labels.items()}
+
+    rule_params = {k: dict(v) for k, v in parsed.rule_params.items()}
+    legacy_expected = parsed.expected_classes if parsed.expected_classes is not None else data.get("expected_classes")
     if legacy_expected and "expected_classes" not in rule_params:
-        rule_params["expected_classes"] = {
-            "expected_classes": [int(c) for c in legacy_expected]
-        }
+        try:
+            rule_params["expected_classes"] = {
+                "expected_classes": [int(c) for c in legacy_expected]  # type: ignore[arg-type]
+            }
+        except (TypeError, ValueError):
+            logger.warning("Legacy expected_classes could not be coerced to ints: %r", legacy_expected)
 
     return ModelConfig(
         labels=labels,
-        input_size=tuple(input_size) if input_size else defaults.input_size,
-        mean=tuple(mean) if mean else defaults.mean,
-        std=tuple(std) if std else defaults.std,
-        normalize=data.get("normalize", defaults.normalize),
-        mask_threshold=float(data.get("mask_threshold", defaults.mask_threshold)),
-        default_rule=data.get("default_rule"),
+        input_size=parsed.input_size if parsed.input_size else defaults.input_size,
+        mean=parsed.mean if parsed.mean else defaults.mean,
+        std=parsed.std if parsed.std else defaults.std,
+        normalize=parsed.normalize,
+        mask_threshold=float(parsed.mask_threshold),
+        default_rule=parsed.default_rule,
         rule_params=rule_params,
     )
