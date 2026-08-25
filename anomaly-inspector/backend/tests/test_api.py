@@ -168,6 +168,30 @@ def test_report_returns_pdf(client, loaded_model):
     assert resp.headers["content-disposition"].startswith("attachment; filename=")
 
 
+def test_report_contains_models_used_and_nok_details(client, loaded_model):
+    """End-to-end: a NOK inspection must surface its score, threshold, and
+    model version in the report's NOK Cases and Models Used sections."""
+    import io as _io
+    from pypdf import PdfReader
+
+    client.post(
+        "/api/infer",
+        data={"sku_name": "SKU-NOK", "threshold": "0.5"},
+        files={"image": ("test.png", _make_png_bytes(), "image/png")},
+    )
+    resp = client.post(
+        "/api/report",
+        data={"start_date": "2020-01-01T00:00:00", "end_date": "2099-12-31T00:00:00"},
+    )
+    assert resp.status_code == 200
+    text = " ".join(
+        page.extract_text() or "" for page in PdfReader(_io.BytesIO(resp.content)).pages
+    )
+    assert "Models Used" in text
+    assert "NOK Cases" in text
+
+
+
 def test_infer_with_customer_name_returns_200(client, loaded_model):
     resp = client.post(
         "/api/infer",
@@ -471,7 +495,7 @@ def test_calibrate_teaches_a_nominal_and_makes_a_biased_sku_pass(
     shared tolerance, and passes once its own baseline is taught."""
     import json as _json
 
-    path = "three_cee_caps/test/ok_case/a.png"
+    png = _make_png_bytes()
 
     def infer():
         return client.post(
@@ -481,23 +505,25 @@ def test_calibrate_teaches_a_nominal_and_makes_a_biased_sku_pass(
                 "decision_rule": "concentricity",
                 "rule_params": _json.dumps(_calibration_params()),
             },
-            files={"image": ("t.png", _make_png_bytes(), "image/png")},
+            files={"image": ("t.png", png, "image/png")},
         ).json()
 
     before = infer()
     assert before["verdict"] == "not_ok", "fixture must be biased off-centre"
 
-    with patch("main._resolve_data_path") as resolve:
-        resolve.return_value.read_bytes.return_value = _make_png_bytes()
-        taught = client.post(
-            "/api/calibrate",
-            data={
-                "sku_name": "SKU-S", "threshold": "0.5",
-                "decision_rule": "concentricity",
-                "image_paths": _json.dumps([path, path, path]),
-                "rule_params": _json.dumps(_calibration_params()),
-            },
-        )
+    taught = client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-S", "threshold": "0.5",
+            "decision_rule": "concentricity",
+            "rule_params": _json.dumps(_calibration_params()),
+        },
+        files=[
+            ("images", ("a.png", png, "image/png")),
+            ("images", ("b.png", png, "image/png")),
+            ("images", ("c.png", png, "image/png")),
+        ],
+    )
     assert taught.status_code == 200, taught.text
     body = taught.json()
     assert body["sample_count"] == 3
@@ -522,17 +548,16 @@ def test_calibrate_teaches_a_nominal_and_makes_a_biased_sku_pass(
 def test_calibration_is_scoped_to_its_sku(client, segmentation_active):
     import json as _json
 
-    with patch("main._resolve_data_path") as resolve:
-        resolve.return_value.read_bytes.return_value = _make_png_bytes()
-        client.post(
-            "/api/calibrate",
-            data={
-                "sku_name": "SKU-A", "threshold": "0.5",
-                "decision_rule": "concentricity",
-                "image_paths": _json.dumps(["p.png"]),
-                "rule_params": _json.dumps(_calibration_params()),
-            },
-        )
+    png = _make_png_bytes()
+    client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-A", "threshold": "0.5",
+            "decision_rule": "concentricity",
+            "rule_params": _json.dumps(_calibration_params()),
+        },
+        files=[("images", ("a.png", png, "image/png"))],
+    )
 
     assert client.get("/api/skus/SKU-A/calibration?decision_rule=concentricity").json()["calibrated"]
     assert not client.get("/api/skus/SKU-B/calibration?decision_rule=concentricity").json()["calibrated"]
@@ -541,31 +566,29 @@ def test_calibration_is_scoped_to_its_sku(client, segmentation_active):
 def test_calibration_can_be_cleared(client, segmentation_active):
     import json as _json
 
-    with patch("main._resolve_data_path") as resolve:
-        resolve.return_value.read_bytes.return_value = _make_png_bytes()
-        client.post(
-            "/api/calibrate",
-            data={
-                "sku_name": "SKU-A", "threshold": "0.5",
-                "decision_rule": "concentricity",
-                "image_paths": _json.dumps(["p.png"]),
-                "rule_params": _json.dumps(_calibration_params()),
-            },
-        )
+    png = _make_png_bytes()
+    client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-A", "threshold": "0.5",
+            "decision_rule": "concentricity",
+            "rule_params": _json.dumps(_calibration_params()),
+        },
+        files=[("images", ("a.png", png, "image/png"))],
+    )
     assert client.delete("/api/skus/SKU-A/calibration?decision_rule=concentricity").json()["cleared"]
     assert not client.get("/api/skus/SKU-A/calibration?decision_rule=concentricity").json()["calibrated"]
 
 
 def test_calibrate_rejects_a_rule_with_no_baseline(client, presence_active):
-    import json as _json
-
+    png = _make_png_bytes()
     resp = client.post(
         "/api/calibrate",
         data={
             "sku_name": "SKU-P", "threshold": "0.5",
             "decision_rule": "expected_classes",
-            "image_paths": _json.dumps(["p.png"]),
         },
+        files=[("images", ("p.png", png, "image/png"))],
     )
     assert resp.status_code == 422
     assert "no per-SKU baseline" in resp.json()["detail"]
@@ -577,18 +600,20 @@ def test_calibrate_reports_unmeasurable_samples_rather_than_averaging_them(
     """A sample whose parts were not found carries no baseline information."""
     import json as _json
 
-    with patch("main._resolve_data_path") as resolve:
-        resolve.return_value.read_bytes.return_value = _make_png_bytes()
-        body = client.post(
-            "/api/calibrate",
-            data={
-                "sku_name": "SKU-S", "threshold": "0.5",
-                "decision_rule": "concentricity",
-                "image_paths": _json.dumps(["a.png", "b.png"]),
-                # No target class in the scene -> nothing measurable.
-                "rule_params": _json.dumps({**_calibration_params(), "target_class": "cap"}),
-            },
-        )
+    png = _make_png_bytes()
+    body = client.post(
+        "/api/calibrate",
+        data={
+            "sku_name": "SKU-S", "threshold": "0.5",
+            "decision_rule": "concentricity",
+            # No target class in the scene -> nothing measurable.
+            "rule_params": _json.dumps({**_calibration_params(), "target_class": "cap"}),
+        },
+        files=[
+            ("images", ("a.png", png, "image/png")),
+            ("images", ("b.png", png, "image/png")),
+        ],
+    )
     # Reference == target degenerates to zero offset, still measurable; assert
     # the endpoint reports what it used rather than silently inventing a value.
     assert body.status_code in (200, 422)
@@ -601,7 +626,7 @@ def test_calibrate_rejects_empty_sample_list(client, segmentation_active):
         "/api/calibrate",
         data={
             "sku_name": "SKU-S", "threshold": "0.5",
-            "decision_rule": "concentricity", "image_paths": "[]",
+            "decision_rule": "concentricity",
         },
     )
     assert resp.status_code == 400
@@ -628,19 +653,18 @@ def test_decision_rules_expose_sidecar_merged_defaults(client, segmentation_acti
     assert conc["defaults"]["target_center_method"] == "outer_circle_fit"
 
 
-def test_calibrate_accepts_uploaded_files_not_only_dataset_paths(
-    client, segmentation_active
-):
-    """A folder browsed in the GUI lives only in the browser, so its images are
-    sent as file uploads with no dataset path. Calibration must teach from those
-    -- the path-only version failed here with 'Image not found'."""
+def test_calibrate_accepts_uploaded_files(client, segmentation_active):
+    """Calibration teaches from browser-uploaded files (a folder browsed in the
+    GUI lives in the browser, not on disk)."""
+    import json as _json
+
     png = _make_png_bytes()
     resp = client.post(
         "/api/calibrate",
         data={
             "sku_name": "SKU-UP", "threshold": "0.5",
             "decision_rule": "concentricity",
-            "rule_params": __import__("json").dumps(_calibration_params()),
+            "rule_params": _json.dumps(_calibration_params()),
         },
         files=[
             ("images", ("a.png", png, "image/png")),
@@ -656,32 +680,12 @@ def test_calibrate_accepts_uploaded_files_not_only_dataset_paths(
     ).json()["calibrated"]
 
 
-def test_calibrate_mixes_dataset_paths_and_uploads(client, segmentation_active):
-    import json as _json
-
-    png = _make_png_bytes()
-    with patch("main._resolve_data_path") as resolve:
-        resolve.return_value.read_bytes.return_value = png
-        resp = client.post(
-            "/api/calibrate",
-            data={
-                "sku_name": "SKU-MIX", "threshold": "0.5",
-                "decision_rule": "concentricity",
-                "image_paths": _json.dumps(["dataset/one.png"]),
-                "rule_params": _json.dumps(_calibration_params()),
-            },
-            files=[("images", ("uploaded.png", png, "image/png"))],
-        )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["sample_count"] == 2
-
-
 def test_calibrate_with_no_samples_at_all_is_400(client, segmentation_active):
     resp = client.post(
         "/api/calibrate",
         data={
             "sku_name": "SKU-S", "threshold": "0.5",
-            "decision_rule": "concentricity", "image_paths": "[]",
+            "decision_rule": "concentricity",
         },
     )
     assert resp.status_code == 400
