@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from inference.graph_probe import GraphPreprocessing, probe
+
 logger = logging.getLogger(__name__)
 
 

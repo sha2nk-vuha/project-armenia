@@ -12,6 +12,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from inference.graph_probe import GraphPreprocessing
+
+# Standard ImageNet statistics, the normalisation both Anomalib and RF-DETR
+# train against. Single source of truth for both preprocessors.
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
 
 def decode_rgb(image_bytes: bytes) -> np.ndarray:
     """Decode image bytes to an RGB uint8 array.
@@ -39,10 +46,14 @@ def chw_tensor(scaled_rgb: np.ndarray) -> np.ndarray:
 
 
 def preprocess(
-    image_bytes: bytes, input_size: tuple[int, int]
+    image_bytes: bytes,
+    input_size: tuple[int, int],
+    graph: GraphPreprocessing | None = None,
+    mean: tuple[float, float, float] = IMAGENET_MEAN,
+    std: tuple[float, float, float] = IMAGENET_STD,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Returns (tensor [1,3,H,W] float32 in [0,1], original_rgb [H,W,3] uint8).
+    Returns (tensor [1,3,H,W] float32, original_rgb [H,W,3] uint8).
     input_size: (height, width)
 
     The tensor is scaled to [0, 1] only. ImageNet mean/std normalization is NOT

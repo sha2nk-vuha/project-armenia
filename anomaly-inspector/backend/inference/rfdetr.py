@@ -90,7 +90,7 @@ def unnormalize_cxcywh(
 def preprocess_image(
     image_bytes: bytes, config: ModelConfig
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Resize, scale, and (optionally) normalise an image for RF-DETR.
+    """Resize, and apply whichever of scaling/normalisation the graph omits.
 
     Unlike the Anomalib preprocessor, RF-DETR normalisation is applied here
     (mean/std) when `config.normalize` is set; disable it if the export bakes
@@ -124,12 +124,14 @@ def preprocess_image(
 
     h, w = config.input_size
     resized = cv2.resize(original_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
-    scaled = resized.astype(np.float32) / 255.0
 
-    if config.normalize:
+    tensor = resized.astype(np.float32)
+    if do_scale:
+        tensor /= 255.0
+    if do_normalize:
         mean = np.array(config.mean, dtype=np.float32)
         std = np.array(config.std, dtype=np.float32)
-        scaled = (scaled - mean) / std
+        tensor = (tensor - mean) / std
 
     return chw_tensor(scaled), original_rgb
 

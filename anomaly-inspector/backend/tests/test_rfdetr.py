@@ -109,7 +109,7 @@ def _white_png(size=(10, 10)):
     return buf.tobytes()
 
 
-def test_preprocess_normalizes_and_shapes_tensor():
+def test_preprocess_normalizes_when_sidecar_asks_for_it():
     from inference.rfdetr import preprocess_image
 
     config = ModelConfig(input_size=(20, 20))
@@ -322,3 +322,16 @@ def test_load_config_defaults_expected_classes_to_empty(tmp_path):
     # Absent -> empty; the pipeline treats "no expected classes configured"
     # as a distinct case rather than a trivially-OK verdict.
     assert config.expected_classes == []
+
+
+def test_load_config_reads_preprocessing_overrides(tmp_path):
+    import json
+    from inference.rfdetr import load_config
+
+    sidecar = tmp_path / "overrides.json"
+    sidecar.write_text(json.dumps({"scale": True, "normalize": False}))
+
+    config = load_config(str(sidecar))
+
+    assert config.scale is True
+    assert config.normalize is False
