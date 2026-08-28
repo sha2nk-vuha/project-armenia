@@ -332,25 +332,19 @@ class AnomalyPipeline(PipelineBase):
 class PresenceAbsencePipeline(PipelineBase):
     """Presence/Absence: RF-DETR detections, judged by a Decision Rule.
 
-    Holds the model plus its model-scoped `ModelConfig` (Class Catalog +
-    preprocessing) and the SKU's `expected_classes`, which seeds the default
-    params of the Expected Classes rule. The Threshold passed to `infer` is the
-    detection-confidence floor.
+    Holds the model plus its model-scoped `ModelConfig` (only the Class Catalog
+    is model-specific now). Decision Rule params come from each rule's own schema
+    defaults, layered under the operator's GUI values — the sidecar no longer
+    seeds them. The Threshold passed to `infer` is the detection-confidence floor.
     """
 
     feature = "presence_absence"
     kinds = frozenset({KIND_DETECTIONS})
     default_rule = "expected_classes"
 
-    def __init__(
-        self,
-        model: ModelSession,
-        config: ModelConfig,
-        expected_classes: list[int],
-    ):
+    def __init__(self, model: ModelSession, config: ModelConfig):
         self.model = model
         self.config = config
-        self.expected_classes = expected_classes
 
     @property
     def labels(self) -> dict[int, str]:
@@ -360,19 +354,6 @@ class PresenceAbsencePipeline(PipelineBase):
             Map of class id -> label.
         """
         return self.config.labels
-
-    def default_rule_params(self, rule_name: str) -> dict:
-        """Seed the Expected Classes rule with the SKU-independent defaults.
-
-        Args:
-            rule_name: Decision Rule name the params are for.
-
-        Returns:
-            Default params dict; empty for other rules.
-        """
-        if rule_name == "expected_classes":
-            return {"expected_classes": self.expected_classes}
-        return {}
 
     def infer(
         self,
@@ -395,7 +376,9 @@ class PresenceAbsencePipeline(PipelineBase):
         """
         original_rgb, outputs = self._preprocess_and_run(image_bytes)
         orig_h, orig_w = original_rgb.shape[:2]
-        detections = decode_detections(outputs, (orig_h, orig_w), threshold, self.config)
+        detections = decode_detections(
+            outputs, (orig_h, orig_w), threshold, self.config, self.model.output_names
+        )
         output = DecodedOutput(
             kinds=self.kinds,
             image_hw=(orig_h, orig_w),
@@ -435,9 +418,10 @@ class SegmentationPipeline(PipelineBase):
     """Segmentation: RF-DETR per-instance masks, judged by a Decision Rule.
 
     Advertises both `masks` and `detections`, so geometry rules and the existing
-    Expected Classes rule are equally selectable against it. The Threshold
-    passed to `infer` is the detection-confidence floor; the mask binarisation
-    cutoff comes from the model sidecar (see docs/adr/0005).
+    Expected Classes rule are equally selectable against it. Rule params come
+    from each rule's schema defaults, layered under the operator's GUI values.
+    The Threshold passed to `infer` is the detection-confidence floor; the mask
+    binarisation cutoff comes from the model sidecar (see docs/adr/0005).
     """
 
     feature = "segmentation"
@@ -456,17 +440,6 @@ class SegmentationPipeline(PipelineBase):
             Map of class id -> label.
         """
         return self.config.labels
-
-    def default_rule_params(self, rule_name: str) -> dict:
-        """Sidecar-declared per-rule defaults for this model.
-
-        Args:
-            rule_name: Decision Rule name the params are for.
-
-        Returns:
-            Default params dict for that rule; empty when none declared.
-        """
-        return self.config.rule_params.get(rule_name, {})
 
     def resolve_rule(self, rule_name: str | None) -> "DecisionRule":
         """Sidecar-aware rule resolution.

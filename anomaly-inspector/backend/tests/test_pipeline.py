@@ -65,7 +65,7 @@ def _mock_detector_session(favored_class=1, num_classes=2):
     return session
 
 
-def _presence_pipeline(expected_classes, favored_class=1):
+def _presence_pipeline(favored_class=1):
     from inference.pipeline import PresenceAbsencePipeline
     from inference.model_config import ModelConfig
 
@@ -77,12 +77,13 @@ def _presence_pipeline(expected_classes, favored_class=1):
         model_version="rf-detr-test",
     )
     config = ModelConfig(input_size=(20, 20), labels={0: "bg", 1: "cap"})
-    return PresenceAbsencePipeline(model, config, expected_classes)
+    return PresenceAbsencePipeline(model, config)
 
 
 def test_presence_pipeline_ok_when_expected_class_present():
-    pipe = _presence_pipeline(expected_classes=[1], favored_class=1)
-    result = pipe.infer(_png_bytes(), threshold=0.5)
+    # Expected Classes now travel per request (operator/GUI), not the sidecar.
+    pipe = _presence_pipeline(favored_class=1)
+    result = pipe.infer(_png_bytes(), threshold=0.5, rule_params={"expected_classes": [1]})
 
     assert isinstance(result, InferenceResult)
     assert result.verdict == "ok"
@@ -92,8 +93,8 @@ def test_presence_pipeline_ok_when_expected_class_present():
 
 
 def test_presence_pipeline_nok_when_expected_class_absent():
-    pipe = _presence_pipeline(expected_classes=[1], favored_class=0)
-    result = pipe.infer(_png_bytes(), threshold=0.5)
+    pipe = _presence_pipeline(favored_class=0)
+    result = pipe.infer(_png_bytes(), threshold=0.5, rule_params={"expected_classes": [1]})
 
     assert result.verdict == "not_ok"
 
@@ -165,15 +166,19 @@ def test_segmentation_detections_carry_mask_area():
     assert det["mask_area_px"] > 0
 
 
-def test_segmentation_sidecar_seeds_rule_params():
-    # Sidecar supplies defaults; the request may override them.
+def test_rule_params_default_from_schema_not_sidecar():
+    # The sidecar no longer seeds rule params: with none supplied, the rule's
+    # own schema default applies (Expected Classes defaults to empty -> every
+    # image passes), and the request still overrides it.
     pipe = _segmentation_pipeline(
         rule_params={"expected_classes": {"expected_classes": ["bottle_cap"]}}
     )
-    assert pipe.infer(_png_bytes(), threshold=0.5).verdict == "not_ok"
+    # Sidecar rule_params are ignored now, so the empty schema default passes.
+    assert pipe.infer(_png_bytes(), threshold=0.5).verdict == "ok"
+    # A request naming an absent class still fails.
     assert pipe.infer(
-        _png_bytes(), threshold=0.5, rule_params={"expected_classes": ["logo"]}
-    ).verdict == "ok"
+        _png_bytes(), threshold=0.5, rule_params={"expected_classes": ["bottle_cap"]}
+    ).verdict == "not_ok"
 
 
 def test_segmentation_rejects_an_incompatible_rule():
