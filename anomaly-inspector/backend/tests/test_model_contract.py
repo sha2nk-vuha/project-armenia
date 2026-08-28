@@ -56,15 +56,13 @@ def test_segmentation_masks_are_stride_four_full_frame():
     )
 
 
-def test_segmentation_sidecar_matches_the_export():
-    """A sidecar that disagrees with the model preprocesses at the wrong size or
-    names classes that do not exist — both silent failures at inference."""
+def test_segmentation_sidecar_labels_match_the_export():
+    """The sidecar carries only the Class Catalog now (input size comes from the
+    session, pre/post from the ONNX signature). A catalog that names classes the
+    export does not have would mislabel detections silently."""
     g = _graph(SEGMENTATION_FEATURE)
     path = FEATURES[SEGMENTATION_FEATURE]["model_path"]
     config = load_config(sidecar_path(str(path)))
-
-    (in_shape,) = [_shape(i) for i in g.input]
-    assert tuple(config.input_size) == tuple(in_shape[2:4])
 
     num_classes = next(_shape(o)[-1] for o in g.output if len(_shape(o)) == 3 and _shape(o)[-1] != 4)
     assert len(config.labels) == num_classes

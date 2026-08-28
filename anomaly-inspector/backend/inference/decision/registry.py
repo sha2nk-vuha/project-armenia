@@ -67,22 +67,28 @@ def compatible_with(kinds: frozenset[str]) -> list[DecisionRule]:
     return [r for r in _RULES.values() if r.consumes <= kinds]
 
 
-def describe(rule: DecisionRule) -> dict:
+def describe(rule: DecisionRule, kinds: frozenset[str] | None = None) -> dict:
     """UI metadata for one rule: identity plus its parameter schema.
 
     Args:
         rule: The Decision Rule to describe.
+        kinds: The active decode's output kinds. When given, a rule may tailor
+            its parameter schema to them (e.g. a geometry rule offering only
+            box-compatible centre methods on a detection-only model); when None
+            the rule's full, unadapted schema is returned.
 
     Returns:
         Dict with name/label/consumes, the ParamSpec schemas, and the
         per-SKU calibration declaration (or None).
     """
     calibration = getattr(rule, "calibration", None)
+    adapt = getattr(rule, "adapt_params", None)
+    params = adapt(kinds) if (kinds is not None and adapt is not None) else rule.params
     return {
         "name": rule.name,
         "label": rule.label,
         "consumes": sorted(rule.consumes),
-        "params": [p.as_dict() for p in rule.params],
+        "params": [p.as_dict() for p in params],
         "calibration": (
             {
                 "param": calibration.param,

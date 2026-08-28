@@ -159,6 +159,13 @@ def _config_for_upload(
         return ModelConfig()
     config = config_from_dict(sidecar) if sidecar is not None else _bundled_template(feature)
     config.input_size = tuple(session.input_shape)
+    # Resolve auto (None) pre/post-processing from the ONNX signature: a
+    # channels-last raw-image input bakes preprocessing; decoded (`xyxy`)
+    # outputs bake postprocessing. An explicit sidecar True/False wins.
+    if config.preprocess is None:
+        config.preprocess = not session.input_channels_last
+    if config.postprocess is None:
+        config.postprocess = not session.outputs_decoded
     return config
 
 
@@ -241,7 +248,7 @@ def loaded_models() -> dict[str, dict]:
 
 _PIPELINE_FACTORIES: dict[str, object] = {
     ANOMALY: lambda s, c: AnomalyPipeline(s),
-    PRESENCE_FEATURE: lambda s, c: PresenceAbsencePipeline(s, c, c.expected_classes),  # type: ignore[arg-type]
+    PRESENCE_FEATURE: lambda s, c: PresenceAbsencePipeline(s, c),
     SEGMENTATION_FEATURE: lambda s, c: SegmentationPipeline(s, c),  # type: ignore[arg-type]
 }
 
@@ -384,12 +391,15 @@ def cascade_options() -> dict:
             continue
         entry = _models.get(name)
         cfg = entry[1] if entry else _bundled_template(name)
+        kinds = _FEATURE_KINDS.get(name, frozenset())
         rules = []
-        for rule in decision.compatible_with(_FEATURE_KINDS.get(name, frozenset())):
-            described = decision.describe(rule)
-            described["defaults"] = decision.resolve_params(
-                rule, _sidecar_rule_defaults(name, rule.name, cfg)
-            )
+        for rule in decision.compatible_with(kinds):
+            # Describe against the feature's output kinds so a rule can tailor
+            # its controls (e.g. only box-compatible centre methods without
+            # masks). Defaults come from those adapted params — the sidecar
+            # carries only the Class Catalog now.
+            described = decision.describe(rule, kinds)
+            _apply_catalog_class_defaults(described, cfg.labels)
             rules.append(described)
         features_out.append(
             {
@@ -408,22 +418,6 @@ def cascade_options() -> dict:
     }
 
 
-def _sidecar_rule_defaults(feature: str, rule_name: str, cfg: ModelConfig) -> dict:
-    """The sidecar's default params for a rule on a feature.
-
-    Args:
-        feature: Feature whose sidecar config applies.
-        rule_name: Decision Rule name.
-        cfg: The config the sidecar was resolved to.
-
-    Returns:
-        The sidecar's default params for that rule; empty when none declared.
-    """
-    if feature == PRESENCE_FEATURE and rule_name == "expected_classes":
-        return {"expected_classes": cfg.expected_classes}
-    return cfg.rule_params.get(rule_name, {})
-
-
 def current_decision_rules() -> list[dict]:
     """UI metadata for the Decision Rules the active pipeline can run.
 
@@ -439,16 +433,40 @@ def current_decision_rules() -> list[dict]:
         return []
     rules = []
     for rule in pipeline.compatible_rules():
-        described = decision.describe(rule)
-        # The *effective* defaults, i.e. the rule's schema defaults with this
-        # model's sidecar layered on. The GUI seeds from these and echoes them
-        # back on every request, so seeding from the bare schema instead would
-        # silently override whatever the sidecar configured.
-        described["defaults"] = decision.resolve_params(
-            rule, pipeline.default_rule_params(rule.name)
-        )
+        # Describe against this model's output kinds so a rule can tailor its
+        # controls (e.g. only box-compatible centre methods without masks). The
+        # GUI seeds from these defaults and echoes them back on every request,
+        # so they must match the offered options.
+        described = decision.describe(rule, pipeline.kinds)
+        _apply_catalog_class_defaults(described, pipeline.labels)
         rules.append(described)
     return rules
+
+
+def _apply_catalog_class_defaults(described: dict, labels: dict[int, str]) -> None:
+    """Point `class` param defaults at real catalog classes, then set defaults.
+
+    A rule's schema default for a `class` param names a class from whatever model
+    it was first written against (concentricity's `bottle_cap`/`logo`), which is
+    not in another model's catalog — the GUI would seed an invalid class and
+    inference would reject it. Any `class` default absent from this model's
+    catalog is reassigned to a catalog class, distinct per class-param position
+    when the catalog is large enough. Defaults valid for this model (and
+    `class_list` defaults) are left untouched.
+
+    Args:
+        described: A `describe(...)` dict; mutated in place, and its `defaults`
+            recomputed from the (possibly rewritten) params.
+        labels: The loaded model's Class Catalog (id -> name).
+    """
+    names = list(labels.values())
+    class_ordinal = 0
+    for p in described["params"]:
+        if p["type"] == "class":
+            if names and p["default"] not in names:
+                p["default"] = names[min(class_ordinal, len(names) - 1)]
+            class_ordinal += 1
+    described["defaults"] = {p["name"]: p["default"] for p in described["params"]}
 
 
 def reset() -> None:

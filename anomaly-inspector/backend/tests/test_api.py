@@ -317,13 +317,17 @@ def test_presence_infer_nok_when_gasket_absent(client):
     cfg = ModelConfig(
         labels={0: "gasket", 1: "no-gasket", 2: "background"},
         input_size=(20, 20),
-        rule_params={"expected_classes": {"expected_classes": [0]}},
     )
     _install_model("presence_absence", sess, cfg)
 
+    # Expected Classes now travel per request (operator/GUI), not the sidecar.
     resp = client.post(
         "/api/infer",
-        data={"sku_name": "SKU-P", "threshold": "0.5"},
+        data={
+            "sku_name": "SKU-P",
+            "threshold": "0.5",
+            "rule_params": '{"expected_classes": [0]}',
+        },
         files={"image": ("test.png", _make_png_bytes(), "image/png")},
     )
     assert resp.status_code == 200
@@ -629,10 +633,10 @@ def test_calibrate_rejects_empty_sample_list(client, segmentation_active):
     assert resp.status_code == 400
 
 
-def test_decision_rules_expose_sidecar_merged_defaults(client, segmentation_active):
-    """The GUI seeds controls from these and echoes them back on every request,
-    so they must already include the sidecar's configuration -- otherwise the
-    browser silently overrides the model's own settings with schema defaults."""
+def test_decision_rules_expose_schema_defaults(client, segmentation_active):
+    """Rule param defaults come from each rule's own schema now — the sidecar
+    carries only the Class Catalog. The GUI seeds controls from these schema
+    defaults; the operator edits them per SKU."""
     rules = client.get("/api/decision-rules").json()["rules"]
     conc = next(r for r in rules if r["name"] == "concentricity")
 
@@ -641,13 +645,13 @@ def test_decision_rules_expose_sidecar_merged_defaults(client, segmentation_acti
     )
     assert conc["defaults"]["target_center_method"] == schema_default
 
-    # And a sidecar value must win over the schema default.
+    # A sidecar rule_params value must NOT leak into the exposed defaults.
     _features._models["segmentation"][1].rule_params = {
         "concentricity": {"target_center_method": "outer_circle_fit"}
     }
     rules = client.get("/api/decision-rules").json()["rules"]
     conc = next(r for r in rules if r["name"] == "concentricity")
-    assert conc["defaults"]["target_center_method"] == "outer_circle_fit"
+    assert conc["defaults"]["target_center_method"] == schema_default
 
 
 def test_calibrate_accepts_uploaded_files(client, segmentation_active):

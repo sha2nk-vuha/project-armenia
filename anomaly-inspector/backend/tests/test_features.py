@@ -111,3 +111,34 @@ def test_active_model_tracks_the_active_feature():
     # The cascade Feature has no single model of its own.
     features.activate(CASCADE_FEATURE)
     assert features.active_model() is None
+
+
+def test_class_param_defaults_follow_the_model_catalog():
+    """A rule's schema class default (concentricity's bottle_cap/logo) is not in
+    every model's catalog. The exposed defaults must name real catalog classes,
+    or the GUI seeds an invalid class and inference rejects it."""
+    described = {
+        "params": [
+            {"name": "reference_class", "type": "class", "default": "bottle_cap"},
+            {"name": "target_class", "type": "class", "default": "logo"},
+            {"name": "max_offset_ratio", "type": "number", "default": 0.1},
+        ]
+    }
+    features._apply_catalog_class_defaults(
+        described, {0: "gasket", 1: "hole", 2: "no-gasket"}
+    )
+    # Reassigned in order to distinct catalog classes; number param untouched.
+    assert described["defaults"]["reference_class"] == "gasket"
+    assert described["defaults"]["target_class"] == "hole"
+    assert described["defaults"]["max_offset_ratio"] == 0.1
+
+
+def test_class_param_defaults_kept_when_valid_for_the_model():
+    described = {
+        "params": [
+            {"name": "reference_class", "type": "class", "default": "bottle_cap"},
+            {"name": "target_class", "type": "class", "default": "logo"},
+        ]
+    }
+    features._apply_catalog_class_defaults(described, {0: "bottle_cap", 1: "logo"})
+    assert described["defaults"] == {"reference_class": "bottle_cap", "target_class": "logo"}
