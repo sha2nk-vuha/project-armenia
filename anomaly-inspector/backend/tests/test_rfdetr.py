@@ -133,6 +133,100 @@ def test_preprocess_skips_normalization_when_disabled():
     assert tensor.min() == pytest.approx(1.0, abs=1e-6)
 
 
+def test_preprocess_bypassed_feeds_raw_hwc_image():
+    # A baked export takes the raw [1,H,W,3] image at pixel scale, no resize.
+    from inference.rfdetr import preprocess_image
+
+    config = ModelConfig(input_size=(20, 20), preprocess=False)
+    tensor, original = preprocess_image(_white_png((10, 12)), config)
+
+    # HWC layout at the original resolution — not resized to input_size, not CHW.
+    assert tensor.shape == (1, 10, 12, 3)
+    assert original.shape == (10, 12, 3)
+    # Pixel values are passed through as float, not scaled to [0,1].
+    assert tensor.max() == pytest.approx(255.0)
+
+
+def test_preprocess_bypassed_feeds_bgr_not_rgb():
+    # Baked exports are calibrated on cv2 (BGR); the fed tensor must be BGR
+    # while the returned original stays RGB for drawing.
+    import cv2
+    from inference.rfdetr import preprocess_image
+
+    # A pure-red RGB image: R=255, G=0, B=0.
+    red_rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+    red_rgb[..., 0] = 255
+    png = cv2.imencode(".png", cv2.cvtColor(red_rgb, cv2.COLOR_RGB2BGR))[1].tobytes()
+
+    tensor, original = preprocess_image(png, ModelConfig(preprocess=False))
+
+    # Fed tensor is BGR: red lands in channel 2, not channel 0.
+    assert tensor[0, 0, 0, 0] == pytest.approx(0.0)
+    assert tensor[0, 0, 0, 2] == pytest.approx(255.0)
+    # The returned original is RGB: red in channel 0.
+    assert original[0, 0, 0] == 255
+
+
+def test_decode_bypassed_reads_boxes_and_scores_directly():
+    # Baked outputs: xyxy pixel boxes + per-class sigmoid scores, both [.,Q,4].
+    # No sigmoid re-applied and no cxcywh un-normalisation.
+    boxes = np.array([[[10.0, 20.0, 110.0, 120.0],
+                       [0.0, 0.0, 5.0, 5.0]]], dtype=np.float32)  # [1, 2, 4]
+    scores = np.array([[[0.1, 0.9, 0.2, 0.05],
+                        [0.1, 0.1, 0.1, 0.1]]], dtype=np.float32)  # [1, 2, 4]
+
+    dets = decode_detections(
+        [boxes, scores],
+        orig_hw=(480, 640),
+        conf_threshold=0.5,
+        config=ModelConfig(postprocess=False),
+        output_names=["boxes_xyxy", "scores"],
+    )
+
+    assert len(dets) == 1  # second query's best score 0.1 < 0.5, dropped
+    d = dets[0]
+    assert d.class_id == 1  # argmax of [0.1, 0.9, 0.2, 0.05]
+    assert d.confidence == pytest.approx(0.9)
+    # Boxes are already pixel xyxy — passed through unchanged.
+    assert d.box == pytest.approx((10.0, 20.0, 110.0, 120.0))
+
+
+def test_decode_bypassed_clamps_boxes_to_image_bounds():
+    # The graph leaves boxes unclamped; a box spilling past the frame is clipped.
+    boxes = np.array([[[-5.0, -8.0, 700.0, 750.0]]], dtype=np.float32)
+    scores = np.array([[[0.1, 0.9, 0.2, 0.05]]], dtype=np.float32)
+
+    dets = decode_detections(
+        [boxes, scores],
+        orig_hw=(480, 640),  # height, width
+        conf_threshold=0.5,
+        config=ModelConfig(postprocess=False),
+        output_names=["boxes_xyxy", "scores"],
+    )
+
+    assert len(dets) == 1
+    # x clipped to [0, 640], y clipped to [0, 480].
+    assert dets[0].box == pytest.approx((0.0, 0.0, 640.0, 480.0))
+
+
+def test_decode_bypassed_selects_outputs_by_value_range_without_names():
+    # Same shapes; with no names, boxes are told from scores by value range.
+    boxes = np.array([[[10.0, 20.0, 110.0, 120.0]]], dtype=np.float32)
+    scores = np.array([[[0.1, 0.9, 0.2, 0.05]]], dtype=np.float32)
+
+    dets = decode_detections(
+        [scores, boxes],  # deliberately swapped port order
+        orig_hw=(480, 640),
+        conf_threshold=0.5,
+        config=ModelConfig(postprocess=False),
+        output_names=None,
+    )
+
+    assert len(dets) == 1
+    assert dets[0].class_id == 1
+    assert dets[0].box == pytest.approx((10.0, 20.0, 110.0, 120.0))
+
+
 def test_load_config_parses_sidecar(tmp_path):
     import json
     from inference.model_config import load_config
@@ -177,6 +271,27 @@ def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
     # Unspecified fields fall back to RF-DETR defaults.
     assert config.mean == ModelConfig().mean
     assert config.normalize == ModelConfig().normalize
+
+
+def test_load_config_reads_preprocess_postprocess_flags(tmp_path):
+    import json
+    from inference.model_config import load_config, ModelConfig
+
+    sidecar = tmp_path / "baked.json"
+    sidecar.write_text(json.dumps({
+        "labels": {"0": "gasket", "1": "hole", "2": "no-gasket"},
+        "preprocess": False,
+        "postprocess": False,
+    }))
+
+    config = load_config(str(sidecar))
+
+    assert config.preprocess is False
+    assert config.postprocess is False
+    # Silent sidecar / bare config default to None ("auto"), resolved from the
+    # ONNX signature when paired with a session (see features._config_for_upload).
+    assert ModelConfig().preprocess is None
+    assert ModelConfig().postprocess is None
 
 
 def test_load_config_reads_expected_classes(tmp_path):

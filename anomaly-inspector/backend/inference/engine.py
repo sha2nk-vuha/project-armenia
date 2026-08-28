@@ -29,6 +29,17 @@ class ModelSession:
     # Index of the scalar image-score output. None → derive score from the
     # anomaly map's maximum (Anomalib's image score == max pixel score).
     score_idx: int | None = 1
+    # Output tensor names in port order, so a decode can pick outputs by name
+    # (e.g. a baked RF-DETR export emits `boxes_xyxy` and `scores`, both shaped
+    # [.,300,4] — indistinguishable by shape alone). Empty when unavailable.
+    output_names: tuple[str, ...] = ()
+    # Signature flags for baked-in pre/post-processing, read off the ONNX I/O.
+    # `input_channels_last` is True for a raw-image input (…,H,W,3) → the export
+    # bakes preprocessing; `outputs_decoded` is True when an output is named for
+    # decoded pixel boxes (e.g. `boxes_xyxy`) → the export bakes postprocessing.
+    # They resolve a ModelConfig's `preprocess`/`postprocess` when left on auto.
+    input_channels_last: bool = False
+    outputs_decoded: bool = False
 
 
 def build_session(model_bytes: bytes, filename: str, model_version: str) -> ModelSession:
@@ -57,8 +68,14 @@ def build_session(model_bytes: bytes, filename: str, model_version: str) -> Mode
     session, runtime = _select_runtime(model_bytes)
     input_name, input_shape = _get_onnx_meta(session) if runtime != "openvino" else _get_openvino_meta(session)
     map_idx, score_idx = _get_output_plan(session, runtime)
+    output_names = _get_output_names(session, runtime)
+    channels_last = _input_is_channels_last(session, runtime)
+    outputs_decoded = any("xyxy" in n.lower() for n in output_names)
 
-    logger.info("Model loaded: runtime=%s input_shape=%s", runtime, input_shape)
+    logger.info(
+        "Model loaded: runtime=%s input_shape=%s channels_last=%s outputs_decoded=%s",
+        runtime, input_shape, channels_last, outputs_decoded,
+    )
     return ModelSession(
         session=session,
         runtime=runtime,
@@ -67,7 +84,68 @@ def build_session(model_bytes: bytes, filename: str, model_version: str) -> Mode
         model_version=model_version,
         map_idx=map_idx,
         score_idx=score_idx,
+        output_names=output_names,
+        input_channels_last=channels_last,
+        outputs_decoded=outputs_decoded,
     )
+
+
+def _input_is_channels_last(session, runtime: str) -> bool:
+    """Whether the model's input is a raw channels-last image (…, H, W, 3).
+
+    A rank-4 input whose last axis is 3 while axis 1 is not (e.g. dynamic H/W)
+    is the raw-image port of an export that bakes preprocessing in — as opposed
+    to the RF-DETR default `[1, 3, H, W]`. Best-effort; False when the input
+    cannot be introspected (e.g. a mocked session in tests).
+
+    Args:
+        session: Runtime session to introspect.
+        runtime: Which runtime produced the session ("openvino" or other).
+
+    Returns:
+        True for a channels-last raw-image input, else False.
+    """
+    try:
+        if runtime == "openvino":
+            shape = _ov_dims(session.input(0).partial_shape())
+        else:
+            shape = session.get_inputs()[0].shape
+        if len(shape) != 4:
+            return False
+        last, axis1 = shape[3], shape[1]
+        return _dim_eq(last, 3) and not _dim_eq(axis1, 3)
+    except (AttributeError, TypeError, IndexError, RuntimeError):
+        return False
+
+
+def _dim_eq(dim, value: int) -> bool:
+    """True when an ONNX/OpenVINO dim (possibly symbolic) equals a concrete int."""
+    try:
+        return int(dim) == value
+    except (TypeError, ValueError):
+        return False
+
+
+def _get_output_names(session, runtime: str) -> tuple[str, ...]:
+    """Output tensor names in port order, across runtimes.
+
+    Best-effort: returns an empty tuple when the session cannot be introspected
+    (e.g. a mocked session in tests), leaving name-based output selection to
+    fall back to its shape/value heuristics.
+
+    Args:
+        session: Runtime session to introspect.
+        runtime: Which runtime produced the session ("openvino" or other).
+
+    Returns:
+        Output names in port order, or () when unavailable.
+    """
+    try:
+        if runtime == "openvino":
+            return tuple(o.any_name for o in session.outputs)
+        return tuple(o.name for o in session.get_outputs())
+    except (AttributeError, TypeError, RuntimeError):
+        return ()
 
 
 def _select_runtime(model_bytes: bytes) -> tuple[object, str]:

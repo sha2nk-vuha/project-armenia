@@ -38,6 +38,21 @@ class ModelConfig:
     mean: tuple[float, float, float] = _IMAGENET_MEAN
     std: tuple[float, float, float] = _IMAGENET_STD
     normalize: bool = True  # False when normalisation is baked into the graph
+    # Full preprocessing/postprocessing bypass, for exports that bake both into
+    # the ONNX graph (e.g. an RF-DETR export whose input is the raw [1,H,W,3]
+    # image and whose outputs are already-decoded xyxy boxes + sigmoid scores).
+    # When `preprocess` is False the raw image is fed as-is (no resize/scale/
+    # normalise, and `normalize`/`mean`/`std`/`input_size` are moot); when
+    # `postprocess` is False the decode reads the model's boxes/scores directly
+    # instead of applying sigmoid and un-normalising cxcywh boxes.
+    #
+    # None means "auto": the value is resolved from the ONNX signature when the
+    # config is paired with its session (see features._config_for_upload) — a
+    # channels-last input means baked preprocessing, `xyxy`-named outputs mean
+    # baked postprocessing. The decode/preprocess helpers treat only an explicit
+    # False as baked, so an unresolved None behaves as the normal (RF-DETR) path.
+    preprocess: bool | None = None
+    postprocess: bool | None = None
     # Sigmoid cutoff turning per-query mask logits into a boolean mask. A
     # property of the export's calibration, not a process tolerance, so it is
     # configured here rather than exposed as an operator control.
@@ -104,6 +119,8 @@ class _SidecarSchema(BaseModel):
     mean: tuple[float, float, float] | None = None
     std: tuple[float, float, float] | None = None
     normalize: bool = True
+    preprocess: bool | None = None
+    postprocess: bool | None = None
     mask_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     default_rule: str | None = None
     rule_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -158,6 +175,8 @@ def config_from_dict(data: dict) -> ModelConfig:
         mean=parsed.mean if parsed.mean else defaults.mean,
         std=parsed.std if parsed.std else defaults.std,
         normalize=parsed.normalize,
+        preprocess=parsed.preprocess,
+        postprocess=parsed.postprocess,
         mask_threshold=float(parsed.mask_threshold),
         default_rule=parsed.default_rule,
         rule_params=rule_params,

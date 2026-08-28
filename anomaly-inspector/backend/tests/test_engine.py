@@ -96,3 +96,52 @@ def test_build_session_falls_back_when_outputs_uninspectable():
     """A mocked session whose outputs cannot be inspected still builds."""
     sess = _build_cpu_session(_make_mock_onnx_session())
     assert (sess.map_idx, sess.score_idx) == (0, 1)
+
+
+def _mock_session_with_io(input_shape, output_names):
+    """A mock ONNX session with a given input shape and output names."""
+    session = MagicMock()
+    inp = MagicMock()
+    inp.name, inp.shape = "raw_image", list(input_shape)
+    session.get_inputs.return_value = [inp]
+    outs = []
+    for n in output_names:
+        o = MagicMock()
+        o.name, o.shape = n, (1, 300, 4)
+        outs.append(o)
+    session.get_outputs.return_value = outs
+    session.run.return_value = [np.zeros((1, 1, 4)), np.zeros((1, 1, 4))]
+    return session
+
+
+def test_build_session_detects_baked_signature():
+    """Channels-last input + xyxy outputs flag a baked pre/post export."""
+    mock = _mock_session_with_io(
+        input_shape=["batch", "height", "width", 3],
+        output_names=["boxes_xyxy", "scores"],
+    )
+    with patch("inference.engine._load_onnx_session", return_value=mock), \
+         patch("inference.engine._get_onnx_meta", return_value=("raw_image", (392, 3))), \
+         patch("inference.engine._load_openvino", side_effect=ImportError):
+        import onnxruntime as ort
+        with patch.object(ort, "get_available_providers", return_value=["CPUExecutionProvider"]):
+            sess = build_session(b"fake", "model.onnx", "v")
+    assert sess.input_channels_last is True
+    assert sess.outputs_decoded is True
+    assert sess.output_names == ("boxes_xyxy", "scores")
+
+
+def test_build_session_detects_standard_signature():
+    """Channels-first input + logit outputs are the normal (non-baked) export."""
+    mock = _mock_session_with_io(
+        input_shape=[1, 3, 384, 384],
+        output_names=["dets", "labels"],
+    )
+    with patch("inference.engine._load_onnx_session", return_value=mock), \
+         patch("inference.engine._get_onnx_meta", return_value=("input", (384, 384))), \
+         patch("inference.engine._load_openvino", side_effect=ImportError):
+        import onnxruntime as ort
+        with patch.object(ort, "get_available_providers", return_value=["CPUExecutionProvider"]):
+            sess = build_session(b"fake", "model.onnx", "v")
+    assert sess.input_channels_last is False
+    assert sess.outputs_decoded is False
