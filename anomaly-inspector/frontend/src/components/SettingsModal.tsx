@@ -24,6 +24,7 @@ interface Props {
 export function SettingsModal({ onModelLoaded, feature, isLoaded, modelVersion, runtime }: Props) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [sidecar, setSidecar] = useState<File | null>(null);
   const [version, setVersion] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +37,7 @@ export function SettingsModal({ onModelLoaded, feature, isLoaded, modelVersion, 
     setLoading(true);
     setError(null);
     try {
-      const result = await api.loadModel(file, version.trim(), feature ?? undefined);
+      const result = await api.loadModel(file, version.trim(), feature ?? undefined, sidecar);
       onModelLoaded(result);
       setOpen(false);
     } catch (e) {
@@ -80,6 +81,22 @@ export function SettingsModal({ onModelLoaded, feature, isLoaded, modelVersion, 
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               className="cursor-pointer"
             />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="sidecar-file">Sidecar (.json)</Label>
+            <Input
+              id="sidecar-file"
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => setSidecar(e.target.files?.[0] ?? null)}
+              className="cursor-pointer"
+            />
+            <p className="text-xs text-gray-500">
+              Optional. Carries only the model's class names (id → label). Without
+              it, raw class indices are shown. Everything else — preprocessing and
+              decision-rule params — is handled in the GUI.
+            </p>
           </div>
 
           <div className="space-y-1.5">

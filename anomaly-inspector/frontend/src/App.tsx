@@ -303,7 +303,12 @@ export default function App() {
     // Keep the per-Feature indicators and cascade options in step with uploads.
     api.getStatus().then((st) => setLoadedModels(st.loaded_models ?? {})).catch(() => {});
     if (isCascade) api.getCascadeOptions().then(setCascadeOptions).catch(() => {});
-  }, [isCascade]);
+    // Re-fetch here explicitly: when a model was already loaded for the active
+    // Feature, `modelLoaded`/`activeFeature` don't change on re-upload, so the
+    // effect that normally refetches decision rules won't fire and the new
+    // sidecar's expected_classes (and other rule defaults) would stay stale.
+    void loadDecisionRules();
+  }, [isCascade, loadDecisionRules]);
 
   // Upload a model (and optional sidecar) for one cascade stage's Feature.
   const handleUploadStageModel = useCallback(
