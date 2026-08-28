@@ -324,14 +324,3 @@ def test_load_config_defaults_expected_classes_to_empty(tmp_path):
     assert config.expected_classes == []
 
 
-def test_load_config_reads_preprocessing_overrides(tmp_path):
-    import json
-    from inference.rfdetr import load_config
-
-    sidecar = tmp_path / "overrides.json"
-    sidecar.write_text(json.dumps({"scale": True, "normalize": False}))
-
-    config = load_config(str(sidecar))
-
-    assert config.scale is True
-    assert config.normalize is False

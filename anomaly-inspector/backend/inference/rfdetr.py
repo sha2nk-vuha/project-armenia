@@ -125,15 +125,13 @@ def preprocess_image(
     h, w = config.input_size
     resized = cv2.resize(original_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    tensor = resized.astype(np.float32)
-    if do_scale:
-        tensor /= 255.0
-    if do_normalize:
+    tensor = resized.astype(np.float32) / 255.0
+    if config.normalize:
         mean = np.array(config.mean, dtype=np.float32)
         std = np.array(config.std, dtype=np.float32)
         tensor = (tensor - mean) / std
 
-    return chw_tensor(scaled), original_rgb
+    return chw_tensor(tensor), original_rgb
 
 
 def _split_logits_and_boxes(outputs: list) -> tuple[np.ndarray, np.ndarray]:
