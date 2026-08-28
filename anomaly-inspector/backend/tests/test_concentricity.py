@@ -362,3 +362,104 @@ def test_score_is_always_the_quantity_thresholded():
         nominal_offset=0.12,
     )
     assert (res.score <= 0.05) == (res.verdict == "ok")
+
+
+# ── Detection (box) path: no masks, box centres, method honoured ─────────────
+
+
+def _det(class_id, cx, cy, r, confidence=0.9):
+    """A detection whose box is a 2r-sided square centred at (cx, cy)."""
+    from inference.rfdetr import Detection
+
+    return Detection(
+        class_id=class_id,
+        confidence=confidence,
+        box=(cx - r, cy - r, cx + r, cy + r),
+    )
+
+
+def _evaluate_boxes(detections, **param_overrides):
+    params = {**DEFAULTS, **param_overrides}
+    ctx = DecisionContext(
+        output=DecodedOutput(
+            kinds=frozenset({KIND_DETECTIONS}),  # detection-only: no masks
+            image_hw=(CANVAS, CANVAS),
+            detections=detections,
+        ),
+        image_rgb=np.zeros((CANVAS, CANVAS, 3), dtype=np.uint8),
+        labels=LABELS,
+        params=params,
+        threshold=0.5,
+    )
+    return RULE.evaluate(ctx)
+
+
+def test_box_path_measures_offset_from_box_centres():
+    # Reference box radius (w+h)/4 = 100; target centre 12px off -> ratio 0.12.
+    res = _evaluate_boxes(
+        [_det(0, 200, 200, 100), _det(1, 212, 200, 40)], max_offset_ratio=0.10
+    )
+    assert res.metrics["geometry"] == "box"
+    assert res.metrics["offset_ratio"] == pytest.approx(0.12, abs=1e-3)
+    assert res.verdict == "not_ok"
+
+
+@pytest.mark.parametrize("method", CENTER_METHODS)
+def test_box_path_honours_every_method_at_the_box_midpoint(method):
+    # Every centre method is validated and threaded through the box path; on an
+    # axis-aligned box they all resolve to the same midpoint, so the measured
+    # offset is identical whichever pair of methods is selected.
+    res = _evaluate_boxes(
+        [_det(0, 200, 200, 100), _det(1, 215, 200, 40)],
+        reference_center_method=method,
+        target_center_method=method,
+    )
+    assert res.metrics["geometry"] == "box"
+    assert res.metrics["reference_center"] == [200.0, 200.0]
+    assert res.metrics["offset_ratio"] == pytest.approx(0.15, abs=1e-3)
+
+
+def test_box_path_rejects_an_unknown_centre_method():
+    from inference.decision.concentricity import box_center
+
+    with pytest.raises(ValueError, match="Unknown centre method"):
+        box_center((0.0, 0.0, 10.0, 10.0), "no_such_method")
+
+
+def test_box_path_missing_class_is_nok():
+    res = _evaluate_boxes([_det(0, 200, 200, 100)])  # no target (logo)
+    assert res.verdict == "not_ok"
+    assert "logo" in res.reason
+
+
+# ── Centre-method options are tailored to the model's output kinds ───────────
+
+
+def test_mask_model_offers_every_centre_method():
+    from inference.decision import describe
+
+    d = describe(RULE, frozenset({KIND_DETECTIONS, KIND_MASKS}))
+    ref = next(p for p in d["params"] if p["name"] == "reference_center_method")
+    assert ref["options"] == CENTER_METHODS
+
+
+def test_detection_only_model_offers_just_the_box_centre():
+    from inference.decision import describe
+    from inference.decision.concentricity import BOX_CENTER_METHODS
+
+    d = describe(RULE, frozenset({KIND_DETECTIONS}))
+    for name in ("reference_center_method", "target_center_method"):
+        p = next(p for p in d["params"] if p["name"] == name)
+        assert p["options"] == BOX_CENTER_METHODS
+        assert p["default"] == "bbox_center"
+    # Non-centre params are untouched.
+    tol = next(p for p in d["params"] if p["name"] == "max_offset_ratio")
+    assert tol["options"] is None
+
+
+def test_describe_without_kinds_returns_full_schema():
+    from inference.decision import describe
+
+    d = describe(RULE)
+    ref = next(p for p in d["params"] if p["name"] == "reference_center_method")
+    assert ref["options"] == CENTER_METHODS

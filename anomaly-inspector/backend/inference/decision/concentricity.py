@@ -10,6 +10,7 @@ meaning at another; a dimensionless eccentricity survives both, and maps onto th
 0-1 control the GUI already has. Raw pixels are still reported in `metrics` for
 operator intuition.
 """
+import dataclasses
 import math
 
 import numpy as np
@@ -21,6 +22,7 @@ from inference.decision.base import (
     COLOR_OK,
     COLOR_REFERENCE,
     COLOR_TARGET,
+    KIND_DETECTIONS,
     KIND_MASKS,
     Circle,
     DecisionContext,
@@ -42,6 +44,15 @@ CENTER_METHODS = [
     "bbox_center",
     "outer_circle_fit",
 ]
+
+# Centre methods that need pixels inside the shape. On a detection-only model
+# there is no mask, so only the box centre applies (every method coincides at
+# the box midpoint there); the GUI is offered just this one to avoid presenting
+# controls that cannot take effect.
+BOX_CENTER_METHODS = ["bbox_center"]
+
+# The centre-method params that get narrowed on a detection-only model.
+_CENTER_METHOD_PARAMS = ("reference_center_method", "target_center_method")
 
 # `outer_circle_fit` tuning. These are deliberately not exposed as rule params:
 # they describe how the estimator works, not a process tolerance, and giving an
@@ -231,16 +242,68 @@ def enclosing_radius(mask: np.ndarray) -> float:
     return float(radius)
 
 
+def box_center(box: tuple[float, float, float, float], method: str) -> tuple[float, float]:
+    """Centre of a bounding box under the chosen centre method.
+
+    The detection-model counterpart of `compute_center`. Every supported centre
+    method coincides at the geometric centre of an axis-aligned box — a filled
+    rectangle is symmetric, so its minimum-enclosing-circle centre, centroid,
+    convex-hull centroid, bbox centre and outer-circle fit are all the midpoint.
+    The value is therefore the box midpoint whichever method is selected; the
+    method is still validated and threaded through so the operator's choice is
+    honoured rather than silently ignored, and so the box path stays consistent
+    with the mask path.
+
+    Args:
+        box: xyxy pixel corners.
+        method: One of CENTER_METHODS.
+
+    Returns:
+        The centre as (cx, cy) in pixel coordinates.
+
+    Raises:
+        ValueError: If `method` is not a known centre method.
+    """
+    if method not in CENTER_METHODS:
+        raise ValueError(f"Unknown centre method: {method!r} (known: {', '.join(CENTER_METHODS)})")
+    x1, y1, x2, y2 = box
+    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def box_radius(box: tuple[float, float, float, float]) -> float:
+    """Equivalent radius of a bounding box, the box-path normalising scale.
+
+    For a round part filling a tight box, half the mean side length
+    (`(w + h) / 4`) recovers the part radius, so the offset ratio stays
+    comparable to the mask path's minimum-enclosing-circle radius.
+
+    Args:
+        box: xyxy pixel corners.
+
+    Returns:
+        The equivalent radius in pixels.
+    """
+    x1, y1, x2, y2 = box
+    w, h = abs(x2 - x1), abs(y2 - y1)
+    return (w + h) / 4.0
+
+
 class ConcentricityRule:
     """OK while the target's offset from the reference stays in tolerance.
 
     Measures centre-to-centre distance as a ratio of the reference's radius,
     deviated from an optional per-SKU nominal (see `calibration`).
+
+    Consumes `detections`, so it runs on any model that emits boxes — a plain
+    detector as well as a segmentation model. When masks are available it uses
+    them (the centre-method params then apply); on a detection-only model it
+    falls back to box centres and box-derived radii, and the centre-method
+    params have no effect.
     """
 
     name = "concentricity"
     label = "Concentric Placement"
-    consumes = frozenset({KIND_MASKS})
+    consumes = frozenset({KIND_DETECTIONS})
     params = [
         ParamSpec(
             name="reference_class",
@@ -301,6 +364,29 @@ class ConcentricityRule:
         param="nominal_offset", metric="offset_ratio", label="Nominal Offset"
     )
 
+    def adapt_params(self, kinds: frozenset[str]) -> list[ParamSpec]:
+        """Params tailored to the model's output kinds.
+
+        On a model that emits masks the full centre-method choice applies. On a
+        detection-only model there is no mask, so the centre-method dropdowns are
+        narrowed to `bbox_center` (the only method that takes effect on a box) —
+        the GUI then never offers a control that cannot change the result.
+
+        Args:
+            kinds: The output kinds the active decode advertises.
+
+        Returns:
+            The parameter schema for those kinds.
+        """
+        if KIND_MASKS in kinds:
+            return self.params
+        return [
+            dataclasses.replace(p, options=BOX_CENTER_METHODS, default="bbox_center")
+            if p.name in _CENTER_METHOD_PARAMS
+            else p
+            for p in self.params
+        ]
+
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
         """Measure the offset ratio and judge it against the tolerance.
 
@@ -324,8 +410,13 @@ class ConcentricityRule:
         # artwork the estimator already centres correctly.
         nominal = float(ctx.params.get("nominal_offset") or 0.0)
 
-        ref_all = [i for i in ctx.output.instances if i.class_id == ref_id]
-        tgt_all = [i for i in ctx.output.instances if i.class_id == tgt_id]
+        # Prefer masks (precise, method-selectable) when the decode carries
+        # them; otherwise measure from detection boxes so a plain detector works.
+        use_masks = KIND_MASKS in ctx.output.kinds and bool(ctx.output.instances)
+        parts = ctx.output.instances if use_masks else ctx.output.detections
+
+        ref_all = [p for p in parts if p.class_id == ref_id]
+        tgt_all = [p for p in parts if p.class_id == tgt_id]
         counts = {
             "reference_instances": len(ref_all),
             "target_instances": len(tgt_all),
@@ -352,19 +443,27 @@ class ConcentricityRule:
         reference = max(ref_all, key=lambda i: i.confidence)
         target = max(tgt_all, key=lambda i: i.confidence)
 
-        ref_radius = enclosing_radius(reference.mask)
+        # Centre + radius from the mask or the box; the selected centre method is
+        # honoured in both paths (on a box every method resolves to the midpoint).
+        def geometry(part, method: str) -> tuple[float, float, float]:
+            if use_masks:
+                cx, cy = compute_center(part.mask, method)
+                return cx, cy, enclosing_radius(part.mask)
+            cx, cy = box_center(part.box, method)
+            return cx, cy, box_radius(part.box)
+
+        ref_cx, ref_cy, ref_radius = geometry(reference, ctx.params["reference_center_method"])
         if ref_radius <= 0:
+            measure = "mask" if use_masks else "box"
             return DecisionResult(
                 verdict=NOT_OK,
-                reason=f"{class_name(ref_id, labels)} mask has no measurable size",
+                reason=f"{class_name(ref_id, labels)} {measure} has no measurable size",
                 score=None,
                 score_label="Offset Ratio",
                 metrics=counts,
             )
 
-        ref_cx, ref_cy = compute_center(reference.mask, ctx.params["reference_center_method"])
-        tgt_cx, tgt_cy = compute_center(target.mask, ctx.params["target_center_method"])
-        tgt_radius = enclosing_radius(target.mask)
+        tgt_cx, tgt_cy, tgt_radius = geometry(target, ctx.params["target_center_method"])
 
         offset_px = math.hypot(tgt_cx - ref_cx, tgt_cy - ref_cy)
         offset_ratio = offset_px / ref_radius
@@ -373,6 +472,7 @@ class ConcentricityRule:
 
         metrics = {
             **counts,
+            "geometry": "mask" if use_masks else "box",
             "offset_ratio": round(offset_ratio, 4),
             "nominal_offset": round(nominal, 4),
             "deviation": round(deviation, 4),
