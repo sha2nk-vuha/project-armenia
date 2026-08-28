@@ -20,3 +20,7 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# AI agent
+skills-lock.json
+

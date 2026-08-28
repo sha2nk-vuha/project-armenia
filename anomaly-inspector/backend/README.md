@@ -14,10 +14,9 @@ the dataset images browsed by the frontend.
   | Asset | Default location | Override env var |
   |-------|------------------|------------------|
   | ONNX model (~144 MB) | `<repo>/model/dinomaly_s_mvtec.onnx` | `DEFAULT_MODEL_PATH` |
-  | Image dataset (MVTec AD) | `<repo>/data/MVTecAD/` | `DATA_ROOT` |
 
-  The dataset root must contain one subdirectory per SKU, each with a `test/`
-  folder (e.g. `data/MVTecAD/bottle/test/...`).
+  Images are uploaded from the browser (folder picker); no on-disk dataset is
+  required.
 
 ## Quick start (recommended)
 
@@ -74,12 +73,10 @@ variables (see [`config.py`](config.py)):
 |----------|---------|---------|
 | `DEFAULT_MODEL_PATH` | `<repo>/model/dinomaly_s_mvtec.onnx` | Model auto-loaded on startup |
 | `DEFAULT_MODEL_VERSION` | `dinomaly_s_mvtec` | Version label recorded with inspections |
-| `DATA_ROOT` | `<repo>/data/MVTecAD` | Root of the browsable image dataset |
 
 Example with custom paths:
 
 ```bash
-DATA_ROOT=/srv/images \
 DEFAULT_MODEL_PATH=/srv/models/model.onnx \
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
@@ -98,10 +95,7 @@ python -m pytest
 |--------|------|-------------|
 | `GET`  | `/api/status` | Whether a model is loaded and its details |
 | `POST` | `/api/load-model` | Upload and load an ONNX model |
-| `GET`  | `/api/skus` | List SKUs (dataset folders with a `test/`) |
-| `GET`  | `/api/skus/{sku}/images` | List a SKU's test images |
-| `GET`  | `/api/images?path=...` | Serve a dataset image (thumbnails) |
-| `POST` | `/api/infer` | Run inference on an uploaded image or dataset path |
+| `POST` | `/api/infer` | Run inference on an uploaded image |
 | `GET`  | `/api/stats?sku_name=...` | Inspection statistics (optionally per SKU) |
 | `POST` | `/api/reset` | Erase all recorded inspections |
 | `POST` | `/api/report` | Generate a PDF report for a date range / customer |

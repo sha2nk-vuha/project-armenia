@@ -46,17 +46,22 @@ def test_migration_rebuilds_legacy_table(tmp_path, monkeypatch):
 
     with engine.connect() as conn:
         info = {row[1]: row for row in conn.execute(text("PRAGMA table_info(inspections)"))}
-        # New column present.
+        # New columns present.
         assert "feature" in info
+        for col in ("decision_rule", "params", "metrics"):
+            assert col in info
+        # anomaly_score renamed to the generic `score` (docs/adr/0005).
+        assert "score" in info and "anomaly_score" not in info
         # score/images relaxed to nullable (notnull flag == 0).
-        assert info["anomaly_score"][3] == 0
+        assert info["score"][3] == 0
         assert info["heatmap_image"][3] == 0
         assert info["segmentation_image"][3] == 0
-        # Existing row preserved and back-filled with the default Feature.
+        # Existing row preserved, back-filled with the default Feature, and the
+        # renamed column keeps its value rather than being silently dropped.
         rows = list(conn.execute(text(
-            "SELECT sku_name, customer_name, feature FROM inspections"
+            "SELECT sku_name, customer_name, feature, score FROM inspections"
         )))
-    assert rows == [("SKU-A", "Acme", "anomaly_detection")]
+    assert rows == [("SKU-A", "Acme", "anomaly_detection", 0.8)]
 
 
 def test_migration_resumes_after_interrupted_rename(tmp_path, monkeypatch):
@@ -78,7 +83,24 @@ def test_migration_resumes_after_interrupted_rename(tmp_path, monkeypatch):
         tables = {row[0] for row in conn.execute(text(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ))}
-        rows = list(conn.execute(text("SELECT sku_name, feature FROM inspections")))
+        rows = list(conn.execute(text("SELECT sku_name, feature, score FROM inspections")))
     # Legacy table consumed, data preserved and back-filled with the default Feature.
     assert "inspections_legacy" not in tables
-    assert rows == [("SKU-A", "anomaly_detection")]
+    assert rows == [("SKU-A", "anomaly_detection", 0.8)]
+
+
+def test_migration_is_idempotent(tmp_path, monkeypatch):
+    """Running init_db twice must not re-rename or duplicate columns."""
+    url = f"sqlite:///{tmp_path / 'twice.db'}"
+    engine = _legacy_engine(url)
+    monkeypatch.setattr(db_module, "engine", engine)
+
+    db_module.init_db()
+    db_module.init_db()
+
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(inspections)"))]
+        rows = list(conn.execute(text("SELECT sku_name, score FROM inspections")))
+    assert len(cols) == len(set(cols))
+    assert "score" in cols and "anomaly_score" not in cols
+    assert rows == [("SKU-A", 0.8)]

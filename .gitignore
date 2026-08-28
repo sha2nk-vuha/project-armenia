@@ -8,6 +8,7 @@
 .agents
 .claude
 agent
+docs/
 
 # OS
 .DS_Store

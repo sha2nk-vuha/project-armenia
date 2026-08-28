@@ -1,62 +1,49 @@
+"""Per-Feature model store: activation, upload, and pipeline construction.
+
+No model auto-loads (docs/adr/0007): activating a Feature only selects it, and a
+model must be uploaded before inference. Both single-Feature and Cascade modes
+read the same store.
+"""
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-import inference.engine as engine
 import inference.features as features
-from config import ANOMALY_FEATURE, PRESENCE_FEATURE
-from inference.pipeline import AnomalyPipeline, PresenceAbsencePipeline
-from inference.rfdetr import PresenceConfig
+from config import ANOMALY_FEATURE, CASCADE_FEATURE, PRESENCE_FEATURE, SEGMENTATION_FEATURE
+from inference.engine import ModelSession
+from inference.model_config import ModelConfig
+from inference.pipeline import AnomalyPipeline, PresenceAbsencePipeline, SegmentationPipeline
 
 
 @pytest.fixture(autouse=True)
-def _clean_state():
-    engine._current_session = None
+def _clean():
     features.reset()
     yield
-    engine._current_session = None
     features.reset()
 
 
-def _session(version="v-test"):
-    return engine.ModelSession(
-        session=MagicMock(),
-        runtime="cpu",
-        input_name="input",
-        input_shape=(32, 32),
-        model_version=version,
+def _session(version="v-test", input_shape=(32, 32)):
+    return ModelSession(
+        session=MagicMock(), runtime="cpu", input_name="input",
+        input_shape=input_shape, model_version=version,
     )
 
 
-def test_no_active_feature_by_default():
+def _install(feature, session=None, config=None):
+    features._models[feature] = (session or _session(), config or ModelConfig())
+
+
+def test_no_active_feature_or_model_by_default():
     assert features.get_active_feature() is None
     assert features.current_pipeline() is None
+    assert features.loaded_models() == {}
 
 
-def test_activate_anomaly_loads_default_model_and_builds_pipeline():
-    with patch("inference.features.engine.load_model_from_path", return_value=_session()) as load:
-        features.activate(ANOMALY_FEATURE)
-
-    load.assert_called_once()
+def test_activate_selects_without_loading_a_model():
+    features.activate(ANOMALY_FEATURE)
     assert features.get_active_feature() == ANOMALY_FEATURE
-    engine._current_session = load.return_value  # emulate engine holding it
-    pipe = features.current_pipeline()
-    assert isinstance(pipe, AnomalyPipeline)
-
-
-def test_activate_presence_loads_sidecar_and_builds_presence_pipeline():
-    sess = _session("rfdetr")
-    cfg = PresenceConfig(labels={0: "gasket"}, expected_classes=[0])
-    with patch("inference.features.engine.load_model_from_path", return_value=sess), \
-         patch("inference.features.load_config", return_value=cfg):
-        features.activate(PRESENCE_FEATURE)
-
-    assert features.get_active_feature() == PRESENCE_FEATURE
-    engine._current_session = sess
-    pipe = features.current_pipeline()
-    assert isinstance(pipe, PresenceAbsencePipeline)
-    # Expected Class policy flows from the sidecar into the pipeline.
-    assert pipe.expected_classes == [0]
+    # No model uploaded yet -> no pipeline.
+    assert features.current_pipeline() is None
 
 
 def test_activate_unknown_feature_raises():
@@ -64,20 +51,94 @@ def test_activate_unknown_feature_raises():
         features.activate("not_a_feature")
 
 
-def test_activate_missing_model_file_raises():
-    with patch("inference.features.Path.exists", return_value=False):
-        with pytest.raises(FileNotFoundError):
-            features.activate(ANOMALY_FEATURE)
-
-
-def test_register_upload_sets_active_feature_without_reloading_default():
-    # Upload path: engine already holds the uploaded session; the manager just
-    # tracks which Feature it belongs to (no default-model reload).
-    sess = _session("uploaded")
-    engine._current_session = sess
-    with patch("inference.features.engine.load_model_from_path") as load:
-        features.register_upload(ANOMALY_FEATURE)
-
-    load.assert_not_called()
-    assert features.get_active_feature() == ANOMALY_FEATURE
+def test_upload_builds_the_anomaly_pipeline():
+    sess = _session()
+    with patch("inference.features.engine.build_session", return_value=sess) as build:
+        features.upload_model(ANOMALY_FEATURE, b"onnx", "m.onnx", "v1")
+    build.assert_called_once()
+    features.activate(ANOMALY_FEATURE)
     assert isinstance(features.current_pipeline(), AnomalyPipeline)
+
+
+def test_upload_segmentation_takes_input_size_from_the_model_and_sidecar_labels():
+    sess = _session(input_shape=(312, 312))
+    with patch("inference.features.engine.build_session", return_value=sess):
+        features.upload_model(
+            SEGMENTATION_FEATURE, b"onnx", "m.onnx", "seg-v1",
+            sidecar={"labels": {"0": "bottle_cap", "1": "logo"}, "input_size": [999, 999]},
+        )
+    _, cfg = features.get_model(SEGMENTATION_FEATURE)
+    assert cfg.labels == {0: "bottle_cap", 1: "logo"}
+    # Preprocess size comes from the model, not the sidecar's stale value.
+    assert cfg.input_size == (312, 312)
+    features.activate(SEGMENTATION_FEATURE)
+    assert isinstance(features.current_pipeline(), SegmentationPipeline)
+
+
+def test_upload_presence_pipeline():
+    sess = _session(input_shape=(20, 20))
+    with patch("inference.features.engine.build_session", return_value=sess):
+        features.upload_model(PRESENCE_FEATURE, b"onnx", "m.onnx", "v1")
+    features.activate(PRESENCE_FEATURE)
+    assert isinstance(features.current_pipeline(), PresenceAbsencePipeline)
+
+
+def test_upload_replaces_the_previous_model_for_that_feature():
+    with patch("inference.features.engine.build_session", return_value=_session("v1")):
+        features.upload_model(ANOMALY_FEATURE, b"a", "m.onnx", "v1")
+    with patch("inference.features.engine.build_session", return_value=_session("v2")):
+        features.upload_model(ANOMALY_FEATURE, b"b", "m.onnx", "v2")
+    assert features.loaded_models()[ANOMALY_FEATURE]["model_version"] == "v2"
+
+
+def test_cannot_upload_a_model_for_the_cascade_feature():
+    with pytest.raises(ValueError):
+        features.upload_model(CASCADE_FEATURE, b"onnx", "m.onnx", "v1")
+
+
+def test_loaded_models_reports_each_upload():
+    _install(ANOMALY_FEATURE, _session("a"))
+    _install(SEGMENTATION_FEATURE, _session("s"))
+    loaded = features.loaded_models()
+    assert set(loaded) == {ANOMALY_FEATURE, SEGMENTATION_FEATURE}
+    assert loaded[ANOMALY_FEATURE]["model_version"] == "a"
+
+
+def test_active_model_tracks_the_active_feature():
+    _install(SEGMENTATION_FEATURE, _session("s"))
+    features.activate(SEGMENTATION_FEATURE)
+    assert features.active_model().model_version == "s"
+    # The cascade Feature has no single model of its own.
+    features.activate(CASCADE_FEATURE)
+    assert features.active_model() is None
+
+
+def test_class_param_defaults_follow_the_model_catalog():
+    """A rule's schema class default (concentricity's bottle_cap/logo) is not in
+    every model's catalog. The exposed defaults must name real catalog classes,
+    or the GUI seeds an invalid class and inference rejects it."""
+    described = {
+        "params": [
+            {"name": "reference_class", "type": "class", "default": "bottle_cap"},
+            {"name": "target_class", "type": "class", "default": "logo"},
+            {"name": "max_offset_ratio", "type": "number", "default": 0.1},
+        ]
+    }
+    features._apply_catalog_class_defaults(
+        described, {0: "gasket", 1: "hole", 2: "no-gasket"}
+    )
+    # Reassigned in order to distinct catalog classes; number param untouched.
+    assert described["defaults"]["reference_class"] == "gasket"
+    assert described["defaults"]["target_class"] == "hole"
+    assert described["defaults"]["max_offset_ratio"] == 0.1
+
+
+def test_class_param_defaults_kept_when_valid_for_the_model():
+    described = {
+        "params": [
+            {"name": "reference_class", "type": "class", "default": "bottle_cap"},
+            {"name": "target_class", "type": "class", "default": "logo"},
+        ]
+    }
+    features._apply_catalog_class_defaults(described, {0: "bottle_cap", 1: "logo"})
+    assert described["defaults"] == {"reference_class": "bottle_cap", "target_class": "logo"}

@@ -1,0 +1,200 @@
+"""Cascade Inspection: an ordered ensemble of stages combined into one Verdict.
+
+Each stage runs its own single-Feature pipeline on the *original* image and
+yields its own Verdict; a Combinator reduces those to the cascade Verdict. Stages
+are independent -- no stage consumes another's output -- so a cascade is just a
+list of the existing pipelines plus a reduce step. See docs/adr/0006.
+"""
+from dataclasses import dataclass
+
+from inference.combine.base import Combinator
+from inference.pipeline import (
+    InferenceResult,
+    StageResult,
+    PipelineBase,
+    labelled_images,
+)
+from inference.verdict import NOT_OK, OK, SKIPPED, stage_metrics_row
+
+
+@dataclass
+class CascadeStage:
+    """One configured stage: a built sub-pipeline plus how to run it."""
+
+    feature: str
+    pipeline: PipelineBase
+    rule: str
+    threshold: float
+    params: dict
+
+
+class CascadePipeline:
+    """Runs staged sub-pipelines and reduces their Verdicts with a Combinator.
+
+    Short-circuit: stages run in order and, when `short_circuit` is on, the run
+    stops as soon as a stage's Verdict is *decisive* for the Combinator (a NOK
+    under AND, an OK under OR). Later stages are recorded as skipped rather than
+    run, which is the whole point of letting the operator order them.
+    """
+
+    feature = "cascade"
+
+    def __init__(
+        self,
+        stages: list[CascadeStage],
+        combinator: Combinator,
+        short_circuit: bool = True,
+    ):
+        if not stages:
+            raise ValueError("A cascade needs at least one stage.")
+        self.stages = stages
+        self.combinator = combinator
+        self.short_circuit = short_circuit
+
+    @property
+    def model_version(self) -> str:
+        """A composite identifier naming the ordered member models.
+
+        Returns:
+            String like 'cascade[anomaly_detection:v1, presence_absence:v2]'.
+        """
+        return "cascade[" + ", ".join(
+            f"{s.feature}:{s.pipeline.model_version}" for s in self.stages
+        ) + "]"
+
+    def infer(
+        self,
+        image_bytes: bytes,
+        threshold: float,  # ignored: each stage carries its own threshold
+        rule_name: str | None = None,
+        rule_params: dict | None = None,
+    ) -> InferenceResult:
+        """Run every stage on one image and reduce their Verdicts to one.
+
+        The `threshold`/`rule_name`/`rule_params` arguments are accepted for
+        interface parity and ignored: each stage carries its own.
+
+        Args:
+            image_bytes: Encoded image every stage inspects.
+            threshold: Ignored (kept for pipeline interface parity).
+            rule_name: Ignored; stages name their own Decision Rules.
+            rule_params: Ignored; stages carry their own resolved params.
+
+        Returns:
+            InferenceResult whose `stages` list records each stage's Verdict
+            (or SKIPPED) and whose metrics carry the per-stage breakdown.
+        """
+        stage_results: list[StageResult] = []
+        evaluated_verdicts: list[str] = []
+        decided = False
+
+        for stage in self.stages:
+            if decided:
+                # Short-circuited past: recorded, not run, and never counted as OK.
+                stage_results.append(
+                    StageResult(
+                        feature=stage.feature,
+                        decision_rule=stage.rule,
+                        verdict=SKIPPED,
+                        evaluated=False,
+                        reason="not evaluated (cascade already decided)",
+                    )
+                )
+                continue
+
+            result = stage.pipeline.infer(
+                image_bytes, stage.threshold, stage.rule, stage.params
+            )
+            evaluated_verdicts.append(result.verdict)
+            stage_results.append(
+                StageResult(
+                    feature=stage.feature,
+                    decision_rule=result.decision_rule or stage.rule,
+                    verdict=result.verdict,
+                    evaluated=True,
+                    score=result.score,
+                    score_label=result.score_label,
+                    reason=result.reason,
+                    images=labelled_images(result.images),
+                    detections=result.detections,
+                )
+            )
+            if self.short_circuit and self.combinator.decisive(result.verdict):
+                decided = True
+
+        verdict = self.combinator.combine(evaluated_verdicts)
+        decisive_stage = _decisive_stage(stage_results, verdict)
+        reason = _cascade_reason(self.combinator, verdict, stage_results, decisive_stage)
+
+        return InferenceResult(
+            verdict=verdict,
+            score=None,  # a cascade has no single scalar
+            images={},
+            decision_rule=self.combinator.name,
+            score_label="",
+            reason=reason,
+            metrics={
+                "combinator": self.combinator.name,
+                "short_circuit": self.short_circuit,
+                "decisive_stage": decisive_stage,
+                "stages": [
+                    stage_metrics_row(
+                        feature=s.feature,
+                        decision_rule=s.decision_rule,
+                        verdict=s.verdict,
+                        evaluated=s.evaluated,
+                        score=s.score,
+                        reason=s.reason,
+                        threshold=stage.threshold,
+                        model_version=stage.pipeline.model_version,
+                    )
+                    for s, stage in zip(stage_results, self.stages)
+                ],
+            },
+            stages=stage_results,
+        )
+
+
+def _decisive_stage(stage_results: list[StageResult], verdict: str) -> int | None:
+    """Index of the stage that settled the cascade, for the report.
+
+    On a NOK it is the first failing stage; on an OK under OR it is the first
+    passing stage; otherwise there is no single decisive stage.
+
+    Args:
+        stage_results: Per-stage outcomes in run order.
+        verdict: The combined cascade Verdict.
+
+    Returns:
+        Index of the decisive stage, or None when none applies.
+    """
+    for i, s in enumerate(stage_results):
+        if s.evaluated and s.verdict == verdict:
+            return i
+    return None
+
+
+def _cascade_reason(
+    combinator: Combinator,
+    verdict: str,
+    stage_results: list[StageResult],
+    decisive: int | None,
+) -> str:
+    """Explain in one line why the cascade reached its Verdict.
+
+    Args:
+        combinator: The Combinator that produced `verdict`.
+        verdict: The combined cascade Verdict.
+        stage_results: Per-stage outcomes in run order.
+        decisive: Index of the decisive stage, if any.
+
+    Returns:
+        Human-readable reason string explaining the outcome.
+    """
+    evaluated = [s for s in stage_results if s.evaluated]
+    if decisive is not None and verdict == NOT_OK:
+        s = stage_results[decisive]
+        return f"stage {decisive + 1} ({s.feature}/{s.decision_rule}) NOK: {s.reason}"
+    if verdict == OK:
+        return f"all {len(evaluated)} evaluated stage(s) passed ({combinator.name.upper()})"
+    return f"no stage passed ({combinator.name.upper()})"

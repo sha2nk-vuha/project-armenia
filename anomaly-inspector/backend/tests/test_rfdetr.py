@@ -3,9 +3,8 @@ import pytest
 
 from inference.rfdetr import (
     Detection,
-    PresenceConfig,
+    ModelConfig,
     decode_detections,
-    evaluate_presence,
 )
 
 
@@ -17,24 +16,54 @@ def _det(class_id, confidence, box=(0.0, 0.0, 10.0, 10.0)):
     return Detection(class_id=class_id, confidence=confidence, box=box)
 
 
+# Parity: these four cases are the pre-seam `evaluate_presence` contract,
+# now asserted against the Expected Classes Decision Rule that replaced it.
+# Same inputs, same Verdicts.
+
+
+def _presence_verdict(dets, expected_classes, threshold, labels=None):
+    from inference.decision import KIND_DETECTIONS, DecisionContext, DecodedOutput, get
+
+    rule = get("expected_classes")
+    ctx = DecisionContext(
+        output=DecodedOutput(
+            kinds=frozenset({KIND_DETECTIONS}), image_hw=(10, 10), detections=dets
+        ),
+        image_rgb=np.zeros((10, 10, 3), dtype=np.uint8),
+        labels=labels or {1: "cap", 2: "logo"},
+        params={"expected_classes": expected_classes},
+        threshold=threshold,
+    )
+    return rule.evaluate(ctx).verdict
+
+
 def test_presence_ok_when_expected_class_present():
-    dets = [_det(1, 0.9)]
-    assert evaluate_presence(dets, expected_classes=[1], threshold=0.5) == "ok"
+    assert _presence_verdict([_det(1, 0.9)], [1], 0.5) == "ok"
 
 
 def test_presence_nok_when_expected_class_missing():
-    dets = [_det(2, 0.9)]
-    assert evaluate_presence(dets, expected_classes=[1], threshold=0.5) == "not_ok"
+    assert _presence_verdict([_det(2, 0.9)], [1], 0.5) == "not_ok"
 
 
 def test_presence_nok_when_expected_below_threshold():
-    dets = [_det(1, 0.3)]
-    assert evaluate_presence(dets, expected_classes=[1], threshold=0.5) == "not_ok"
+    assert _presence_verdict([_det(1, 0.3)], [1], 0.5) == "not_ok"
 
 
 def test_presence_requires_all_expected_classes():
-    dets = [_det(1, 0.9)]
-    assert evaluate_presence(dets, expected_classes=[1, 2], threshold=0.5) == "not_ok"
+    assert _presence_verdict([_det(1, 0.9)], [1, 2], 0.5) == "not_ok"
+
+
+def test_presence_resolves_expected_classes_by_name():
+    # Config carries names, not ids, so a retrain that reorders classes survives.
+    assert _presence_verdict([_det(1, 0.9)], ["cap"], 0.5) == "ok"
+    assert _presence_verdict([_det(1, 0.9)], ["logo"], 0.5) == "not_ok"
+
+
+def test_presence_unknown_class_name_raises_loudly():
+    from inference.decision import ClassNotFound
+
+    with pytest.raises(ClassNotFound, match="bottle_cap"):
+        _presence_verdict([_det(1, 0.9)], ["bottle_cap"], 0.5)
 
 
 def test_decode_filters_by_confidence_and_scales_boxes():
@@ -49,7 +78,7 @@ def test_decode_filters_by_confidence_and_scales_boxes():
     )  # [1, 2, 4]
 
     dets = decode_detections(
-        [logits, boxes], orig_hw=(100, 200), conf_threshold=0.5, config=PresenceConfig()
+        [logits, boxes], orig_hw=(100, 200), conf_threshold=0.5, config=ModelConfig()
     )
 
     assert len(dets) == 1
@@ -66,7 +95,7 @@ def test_decode_handles_swapped_output_order():
     boxes = np.array([[[0.5, 0.5, 0.5, 0.5]]], dtype=np.float32)  # [1, 1, 4]
 
     dets = decode_detections(
-        [boxes, logits], orig_hw=(100, 100), conf_threshold=0.5, config=PresenceConfig()
+        [boxes, logits], orig_hw=(100, 100), conf_threshold=0.5, config=ModelConfig()
     )
 
     assert len(dets) == 1
@@ -83,7 +112,7 @@ def _white_png(size=(10, 10)):
 def test_preprocess_normalizes_when_sidecar_asks_for_it():
     from inference.rfdetr import preprocess_image
 
-    config = PresenceConfig(input_size=(20, 20), normalize=True)
+    config = ModelConfig(input_size=(20, 20))
     tensor, original = preprocess_image(_white_png((10, 10)), config)
 
     assert tensor.shape == (1, 3, 20, 20)
@@ -96,7 +125,7 @@ def test_preprocess_normalizes_when_sidecar_asks_for_it():
 def test_preprocess_skips_normalization_when_disabled():
     from inference.rfdetr import preprocess_image
 
-    config = PresenceConfig(input_size=(20, 20), normalize=False)
+    config = ModelConfig(input_size=(20, 20), normalize=False)
     tensor, _ = preprocess_image(_white_png((10, 10)), config)
 
     # Only scaled to [0,1]; white stays 1.0.
@@ -104,68 +133,103 @@ def test_preprocess_skips_normalization_when_disabled():
     assert tensor.min() == pytest.approx(1.0, abs=1e-6)
 
 
-def test_preprocess_defers_to_graph_probe_when_sidecar_is_silent():
-    from inference.graph_probe import GraphPreprocessing
+def test_preprocess_bypassed_feeds_raw_hwc_image():
+    # A baked export takes the raw [1,H,W,3] image at pixel scale, no resize.
     from inference.rfdetr import preprocess_image
 
-    config = PresenceConfig(input_size=(20, 20))  # scale/normalize unset
-    bare_graph = GraphPreprocessing(scales=False, normalizes=False, detail="test")
-    tensor, _ = preprocess_image(_white_png((10, 10)), config, bare_graph)
+    config = ModelConfig(input_size=(20, 20), preprocess=False)
+    tensor, original = preprocess_image(_white_png((10, 12)), config)
 
-    # The graph does neither step, so both run here.
-    expected_r = (1.0 - config.mean[0]) / config.std[0]
-    assert tensor[0, 0].mean() == pytest.approx(expected_r, abs=1e-3)
-
-
-def test_preprocess_skips_steps_the_graph_already_performs():
-    from inference.graph_probe import GraphPreprocessing
-    from inference.rfdetr import preprocess_image
-
-    config = PresenceConfig(input_size=(20, 20))
-    full_graph = GraphPreprocessing(scales=True, normalizes=True, detail="test")
-    tensor, _ = preprocess_image(_white_png((10, 10)), config, full_graph)
-
-    # Neither step runs here; white stays at its raw 255.
-    assert tensor.max() == pytest.approx(255.0, abs=1e-6)
+    # HWC layout at the original resolution — not resized to input_size, not CHW.
+    assert tensor.shape == (1, 10, 12, 3)
+    assert original.shape == (10, 12, 3)
+    # Pixel values are passed through as float, not scaled to [0,1].
+    assert tensor.max() == pytest.approx(255.0)
 
 
-def test_sidecar_overrides_the_graph_probe():
-    """An explicit sidecar value wins over what the probe read."""
-    from inference.graph_probe import GraphPreprocessing
-    from inference.rfdetr import preprocess_image
-
-    config = PresenceConfig(input_size=(20, 20), normalize=False)
-    bare_graph = GraphPreprocessing(scales=False, normalizes=False, detail="test")
-    tensor, _ = preprocess_image(_white_png((10, 10)), config, bare_graph)
-
-    assert tensor.max() == pytest.approx(1.0, abs=1e-6)
-
-
-def test_unprobed_graph_skips_normalization():
-    """No probe result: assume the export bakes normalisation in."""
-    from inference.rfdetr import preprocess_image
-
-    tensor, _ = preprocess_image(_white_png((10, 10)), PresenceConfig(input_size=(20, 20)))
-
-    assert tensor.max() == pytest.approx(1.0, abs=1e-6)
-
-
-def test_draw_detections_returns_decodable_image():
+def test_preprocess_bypassed_feeds_bgr_not_rgb():
+    # Baked exports are calibrated on cv2 (BGR); the fed tensor must be BGR
+    # while the returned original stays RGB for drawing.
     import cv2
-    from inference.rfdetr import draw_detections
+    from inference.rfdetr import preprocess_image
 
-    original = np.zeros((50, 50, 3), dtype=np.uint8)
-    dets = [Detection(1, 0.9, (5.0, 5.0, 20.0, 20.0))]
-    out = draw_detections(original, dets, labels={1: "cap"})
+    # A pure-red RGB image: R=255, G=0, B=0.
+    red_rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+    red_rgb[..., 0] = 255
+    png = cv2.imencode(".png", cv2.cvtColor(red_rgb, cv2.COLOR_RGB2BGR))[1].tobytes()
 
-    assert isinstance(out, bytes) and len(out) > 0
-    decoded = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
-    assert decoded.shape == (50, 50, 3)
+    tensor, original = preprocess_image(png, ModelConfig(preprocess=False))
+
+    # Fed tensor is BGR: red lands in channel 2, not channel 0.
+    assert tensor[0, 0, 0, 0] == pytest.approx(0.0)
+    assert tensor[0, 0, 0, 2] == pytest.approx(255.0)
+    # The returned original is RGB: red in channel 0.
+    assert original[0, 0, 0] == 255
+
+
+def test_decode_bypassed_reads_boxes_and_scores_directly():
+    # Baked outputs: xyxy pixel boxes + per-class sigmoid scores, both [.,Q,4].
+    # No sigmoid re-applied and no cxcywh un-normalisation.
+    boxes = np.array([[[10.0, 20.0, 110.0, 120.0],
+                       [0.0, 0.0, 5.0, 5.0]]], dtype=np.float32)  # [1, 2, 4]
+    scores = np.array([[[0.1, 0.9, 0.2, 0.05],
+                        [0.1, 0.1, 0.1, 0.1]]], dtype=np.float32)  # [1, 2, 4]
+
+    dets = decode_detections(
+        [boxes, scores],
+        orig_hw=(480, 640),
+        conf_threshold=0.5,
+        config=ModelConfig(postprocess=False),
+        output_names=["boxes_xyxy", "scores"],
+    )
+
+    assert len(dets) == 1  # second query's best score 0.1 < 0.5, dropped
+    d = dets[0]
+    assert d.class_id == 1  # argmax of [0.1, 0.9, 0.2, 0.05]
+    assert d.confidence == pytest.approx(0.9)
+    # Boxes are already pixel xyxy — passed through unchanged.
+    assert d.box == pytest.approx((10.0, 20.0, 110.0, 120.0))
+
+
+def test_decode_bypassed_clamps_boxes_to_image_bounds():
+    # The graph leaves boxes unclamped; a box spilling past the frame is clipped.
+    boxes = np.array([[[-5.0, -8.0, 700.0, 750.0]]], dtype=np.float32)
+    scores = np.array([[[0.1, 0.9, 0.2, 0.05]]], dtype=np.float32)
+
+    dets = decode_detections(
+        [boxes, scores],
+        orig_hw=(480, 640),  # height, width
+        conf_threshold=0.5,
+        config=ModelConfig(postprocess=False),
+        output_names=["boxes_xyxy", "scores"],
+    )
+
+    assert len(dets) == 1
+    # x clipped to [0, 640], y clipped to [0, 480].
+    assert dets[0].box == pytest.approx((0.0, 0.0, 640.0, 480.0))
+
+
+def test_decode_bypassed_selects_outputs_by_value_range_without_names():
+    # Same shapes; with no names, boxes are told from scores by value range.
+    boxes = np.array([[[10.0, 20.0, 110.0, 120.0]]], dtype=np.float32)
+    scores = np.array([[[0.1, 0.9, 0.2, 0.05]]], dtype=np.float32)
+
+    dets = decode_detections(
+        [scores, boxes],  # deliberately swapped port order
+        orig_hw=(480, 640),
+        conf_threshold=0.5,
+        config=ModelConfig(postprocess=False),
+        output_names=None,
+    )
+
+    assert len(dets) == 1
+    assert dets[0].class_id == 1
+    assert dets[0].box == pytest.approx((10.0, 20.0, 110.0, 120.0))
 
 
 def test_load_config_parses_sidecar(tmp_path):
     import json
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     sidecar = tmp_path / "rfdetr-nano.json"
     sidecar.write_text(json.dumps({
@@ -185,7 +249,7 @@ def test_load_config_parses_sidecar(tmp_path):
 
 
 def test_load_config_falls_back_to_defaults_when_absent(tmp_path):
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     config = load_config(str(tmp_path / "missing.json"))
 
@@ -196,7 +260,7 @@ def test_load_config_falls_back_to_defaults_when_absent(tmp_path):
 
 def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
     import json
-    from inference.rfdetr import load_config, PresenceConfig
+    from inference.model_config import load_config, ModelConfig
 
     sidecar = tmp_path / "labels-only.json"
     sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))
@@ -205,15 +269,34 @@ def test_load_config_partial_sidecar_keeps_defaults(tmp_path):
 
     assert config.labels == {0: "gasket"}
     # Unspecified fields fall back to RF-DETR defaults.
-    assert config.mean == PresenceConfig().mean
-    # Absent, not false: the graph probe decides.
-    assert config.normalize is None
-    assert config.scale is None
+    assert config.mean == ModelConfig().mean
+    assert config.normalize == ModelConfig().normalize
+
+
+def test_load_config_reads_preprocess_postprocess_flags(tmp_path):
+    import json
+    from inference.model_config import load_config, ModelConfig
+
+    sidecar = tmp_path / "baked.json"
+    sidecar.write_text(json.dumps({
+        "labels": {"0": "gasket", "1": "hole", "2": "no-gasket"},
+        "preprocess": False,
+        "postprocess": False,
+    }))
+
+    config = load_config(str(sidecar))
+
+    assert config.preprocess is False
+    assert config.postprocess is False
+    # Silent sidecar / bare config default to None ("auto"), resolved from the
+    # ONNX signature when paired with a session (see features._config_for_upload).
+    assert ModelConfig().preprocess is None
+    assert ModelConfig().postprocess is None
 
 
 def test_load_config_reads_expected_classes(tmp_path):
     import json
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     sidecar = tmp_path / "with-expected.json"
     sidecar.write_text(json.dumps({
@@ -229,7 +312,7 @@ def test_load_config_reads_expected_classes(tmp_path):
 
 def test_load_config_defaults_expected_classes_to_empty(tmp_path):
     import json
-    from inference.rfdetr import load_config
+    from inference.model_config import load_config
 
     sidecar = tmp_path / "no-expected.json"
     sidecar.write_text(json.dumps({"labels": {"0": "gasket"}}))
