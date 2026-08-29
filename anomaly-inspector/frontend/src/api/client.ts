@@ -166,6 +166,11 @@ export interface FeatureInfo {
   name: string;
   label: string;
   threshold_label: string;
+  supports_letterbox_overlay?: boolean;
+}
+
+export interface OverlayOptions {
+  letterbox_default: boolean;
 }
 
 export interface StatusResponse {
@@ -177,6 +182,7 @@ export interface StatusResponse {
   features?: FeatureInfo[];
   // Which Features currently have a model loaded, keyed by Feature name.
   loaded_models?: Record<string, ModelInfo>;
+  overlay_options?: OverlayOptions;
 }
 
 export interface DatasetImage {
@@ -195,7 +201,8 @@ function inferForm(
   customerName: string,
   decisionRule?: string | null,
   ruleParams?: RuleParams | null,
-  cascadeSpec?: CascadeSpec | null
+  cascadeSpec?: CascadeSpec | null,
+  letterbox?: boolean
 ): FormData {
   const form = new FormData();
   form.append("sku_name", skuName);
@@ -206,6 +213,7 @@ function inferForm(
     form.append("rule_params", JSON.stringify(ruleParams));
   }
   if (cascadeSpec) form.append("cascade_spec", JSON.stringify(cascadeSpec));
+  if (letterbox !== undefined) form.append("letterbox", letterbox ? "true" : "false");
   return form;
 }
 
@@ -240,9 +248,18 @@ export const api = {
     customerName: string,
     decisionRule?: string | null,
     ruleParams?: RuleParams | null,
-    cascadeSpec?: CascadeSpec | null
+    cascadeSpec?: CascadeSpec | null,
+    letterbox?: boolean
   ): Promise<InferResponse> {
-    const form = inferForm(skuName, threshold, customerName, decisionRule, ruleParams, cascadeSpec);
+    const form = inferForm(
+      skuName,
+      threshold,
+      customerName,
+      decisionRule,
+      ruleParams,
+      cascadeSpec,
+      letterbox
+    );
     form.append("image", image);
     const res = await fetch("/api/infer", { method: "POST", body: form });
     return handleResponse<InferResponse>(res);
@@ -270,13 +287,15 @@ export const api = {
     decisionRule: string,
     threshold: number,
     ruleParams: RuleParams,
-    imageFiles: File[]
+    imageFiles: File[],
+    letterbox?: boolean
   ): Promise<CalibrateResult> {
     const form = new FormData();
     form.append("sku_name", skuName);
     form.append("decision_rule", decisionRule);
     form.append("threshold", String(threshold));
     form.append("rule_params", JSON.stringify(ruleParams));
+    if (letterbox !== undefined) form.append("letterbox", letterbox ? "true" : "false");
     for (const file of imageFiles) form.append("images", file);
     const res = await fetch("/api/calibrate", { method: "POST", body: form });
     return handleResponse<CalibrateResult>(res);

@@ -26,6 +26,18 @@ import { ResizeHandle } from "./components/ResizeHandle";
 const DEFAULT_SETUP_WIDTH = 288;
 const DEFAULT_RESULTS_WIDTH = 480;
 const MIN_GALLERY_WIDTH = 200;
+const LETTERBOX_STORAGE_KEY = "anomaly-inspector.letterbox-overlay";
+
+function readLetterboxPreference(serverDefault: boolean): boolean {
+  try {
+    const stored = localStorage.getItem(LETTERBOX_STORAGE_KEY);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+  } catch {
+    // localStorage may be unavailable in some contexts.
+  }
+  return serverDefault;
+}
 
 const clamp = (v: number, min: number, max: number) =>
   Math.min(Math.max(v, min), Math.max(min, max));
@@ -103,6 +115,7 @@ export default function App() {
 
   const [customerName, setCustomerName] = useState("");
   const [threshold, setThreshold] = useState(0.5);
+  const [letterboxOverlay, setLetterboxOverlay] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [originalSrc, setOriginalSrc] = useState<string | null>(null);
   const [inferringKey, setInferringKey] = useState<string | null>(null);
@@ -169,6 +182,9 @@ export default function App() {
         setFeatures(status.features ?? []);
         setActiveFeature(status.active_feature ?? null);
         setLoadedModels(status.loaded_models ?? {});
+        setLetterboxOverlay(
+          readLetterboxPreference(status.overlay_options?.letterbox_default ?? false)
+        );
         if (status.model_loaded) {
           setModelStatus({
             status: "loaded",
@@ -236,6 +252,15 @@ export default function App() {
     void loadCalibration();
   }, [loadCalibration]);
 
+  const handleLetterboxOverlayChange = useCallback((value: boolean) => {
+    setLetterboxOverlay(value);
+    try {
+      localStorage.setItem(LETTERBOX_STORAGE_KEY, value ? "true" : "false");
+    } catch {
+      // Ignore storage failures; the in-session value still applies.
+    }
+  }, []);
+
   const handleCalibrate = useCallback(async () => {
     if (!selectedSku || !selectedRule || !calibrationGroup) return;
     const group = images.filter((i) => i.category === calibrationGroup);
@@ -250,7 +275,7 @@ export default function App() {
     setInferError(null);
     try {
       const result = await api.calibrate(
-        selectedSku, selectedRule, threshold, ruleParams, uploadFiles
+        selectedSku, selectedRule, threshold, ruleParams, uploadFiles, letterboxOverlay
       );
       setCalibration({ ...result, calibrated: true });
       setRuleParams((prev) => ({ ...prev, ...result.params }));
@@ -265,7 +290,7 @@ export default function App() {
     } finally {
       setCalibrating(false);
     }
-  }, [selectedSku, selectedRule, calibrationGroup, images, uploadedFiles, threshold, ruleParams]);
+  }, [selectedSku, selectedRule, calibrationGroup, images, uploadedFiles, threshold, ruleParams, letterboxOverlay]);
 
   const handleClearCalibration = useCallback(async () => {
     if (!selectedSku || !selectedRule) return;
@@ -403,7 +428,16 @@ export default function App() {
     setInferringKey(path);
     try {
       const cascade = isCascade ? cascadeSpec : null;
-      const result = await api.infer(file, selectedSku, threshold, customerName, selectedRule, ruleParams, cascade);
+      const result = await api.infer(
+        file,
+        selectedSku,
+        threshold,
+        customerName,
+        selectedRule,
+        ruleParams,
+        cascade,
+        letterboxOverlay
+      );
       setInferResult(result);
       setVerdicts((v) => ({ ...v, [path]: result.verdict }));
       setStats(await api.getStats(selectedSku || null, activeFeature, selectedRule));
@@ -438,7 +472,16 @@ export default function App() {
       setInferringKey(path);
       setSelectedPath(path);
       try {
-        const result = await api.infer(file, selectedSku, threshold, customerName, selectedRule, ruleParams, cascade);
+        const result = await api.infer(
+        file,
+        selectedSku,
+        threshold,
+        customerName,
+        selectedRule,
+        ruleParams,
+        cascade,
+        letterboxOverlay
+      );
         setBatchRows((rows) =>
           rows.map((r) => (r.path === path ? { ...r, verdict: result.verdict, score: result.score ?? null } : r))
         );
@@ -550,6 +593,7 @@ export default function App() {
           <InferencePanel
             selectedSku={selectedSku}
             threshold={threshold}
+            letterboxOverlay={letterboxOverlay}
             customerName={customerName}
             modelLoaded={modelLoaded}
             features={features}
@@ -579,6 +623,7 @@ export default function App() {
             onFeatureChange={handleFeatureChange}
             onSkuChange={setSelectedSku}
             onThresholdChange={setThreshold}
+            onLetterboxOverlayChange={handleLetterboxOverlayChange}
             onCustomerChange={setCustomerName}
             onUploadDirectory={handleUploadDirectory}
             onRunAll={runAllInferences}

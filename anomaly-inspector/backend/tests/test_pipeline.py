@@ -44,6 +44,21 @@ def test_anomaly_pipeline_returns_verdict_and_visualizations():
     assert isinstance(result.images["segmentation"], bytes)
 
 
+def test_anomaly_pipeline_letterbox_preprocess(monkeypatch):
+    captured: dict = {}
+
+    def _fake_preprocess(image_bytes, input_shape, letterbox=False):
+        captured["letterbox"] = letterbox
+        from inference.preprocessor import preprocess
+
+        return preprocess(image_bytes, input_shape, letterbox=letterbox)
+
+    monkeypatch.setattr("inference.pipeline.preprocess", _fake_preprocess)
+    pipe = _anomaly_pipeline()
+    pipe.infer(_png_bytes(), threshold=0.5, letterbox=True)
+    assert captured["letterbox"] is True
+
+
 def test_anomaly_pipeline_verdict_ok_below_threshold():
     pipe = _anomaly_pipeline(pred_score=0.2)
     result = pipe.infer(_png_bytes(), threshold=0.5)

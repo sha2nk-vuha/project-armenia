@@ -7,6 +7,7 @@ list of the existing pipelines plus a reduce step. See docs/adr/0006.
 """
 from dataclasses import dataclass
 
+from config import ANOMALY_FEATURE
 from inference.combine.base import Combinator
 from inference.pipeline import (
     InferenceResult,
@@ -68,6 +69,8 @@ class CascadePipeline:
         threshold: float,  # ignored: each stage carries its own threshold
         rule_name: str | None = None,
         rule_params: dict | None = None,
+        *,
+        letterbox: bool = False,
     ) -> InferenceResult:
         """Run every stage on one image and reduce their Verdicts to one.
 
@@ -79,6 +82,8 @@ class CascadePipeline:
             threshold: Ignored (kept for pipeline interface parity).
             rule_name: Ignored; stages name their own Decision Rules.
             rule_params: Ignored; stages carry their own resolved params.
+            letterbox: When True, anomaly-detection stages letterbox before
+                inference so overlays align on non-square images.
 
         Returns:
             InferenceResult whose `stages` list records each stage's Verdict
@@ -103,7 +108,11 @@ class CascadePipeline:
                 continue
 
             result = stage.pipeline.infer(
-                image_bytes, stage.threshold, stage.rule, stage.params
+                image_bytes,
+                stage.threshold,
+                stage.rule,
+                stage.params,
+                letterbox=letterbox if stage.feature == ANOMALY_FEATURE else False,
             )
             evaluated_verdicts.append(result.verdict)
             stage_results.append(

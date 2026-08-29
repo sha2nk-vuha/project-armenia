@@ -8,9 +8,50 @@ colour handling stay consistent.
 import cv2
 import numpy as np
 
+from inference.preprocessor import PreprocessTransform
+
+
+def resize_anomaly_map_to_original(
+    anomaly_map: np.ndarray,
+    transform: PreprocessTransform | None,
+    original_rgb: np.ndarray,
+    *,
+    interpolation: int = cv2.INTER_LINEAR,
+) -> np.ndarray:
+    """Map an anomaly tensor from model space back onto the original image.
+
+    When `transform` is provided the map is first resized to model resolution,
+    the letterbox padding is cropped away, and the content is scaled to the
+    original frame. Without a transform the map is stretched directly to the
+    original size (legacy behaviour).
+    """
+    amap = anomaly_map.squeeze().astype(np.float32)
+    orig_h, orig_w = original_rgb.shape[:2]
+
+    if transform is None:
+        if amap.shape != (orig_h, orig_w):
+            return cv2.resize(amap, (orig_w, orig_h), interpolation=interpolation)
+        return amap
+
+    model_h, model_w = transform.model_hw
+    if amap.shape != (model_h, model_w):
+        amap = cv2.resize(amap, (model_w, model_h), interpolation=interpolation)
+
+    scaled_h, scaled_w = transform.scaled_hw
+    pad_top, pad_left = transform.pad_top, transform.pad_left
+    cropped = amap[pad_top : pad_top + scaled_h, pad_left : pad_left + scaled_w]
+
+    if cropped.shape != (orig_h, orig_w):
+        return cv2.resize(cropped, (orig_w, orig_h), interpolation=interpolation)
+    return cropped
+
 
 def generate_heatmap(
-    anomaly_map: np.ndarray, original_rgb: np.ndarray, alpha: float = 0.5
+    anomaly_map: np.ndarray,
+    original_rgb: np.ndarray,
+    alpha: float = 0.5,
+    *,
+    transform: PreprocessTransform | None = None,
 ) -> bytes:
     """
     anomaly_map: float32 [1,1,H,W] or [H,W], already normalised to [0,1]
@@ -27,17 +68,16 @@ def generate_heatmap(
         anomaly_map: Float map already normalised to [0,1]; [1,1,H,W] or [H,W].
         original_rgb: Frame to blend onto ([H,W,3] uint8).
         alpha: Heatmap opacity in the blend.
+        transform: Preprocess transform used when the image was fed to the model.
 
     Returns:
         JPEG bytes of the jet-coloured heatmap over the original.
     """
     amap = anomaly_map.squeeze().astype(np.float32)
-    amap_norm = (np.clip(amap, 0.0, 1.0) * 255).astype(np.uint8)
+    amap_resized = resize_anomaly_map_to_original(amap, transform, original_rgb)
+    amap_norm = (np.clip(amap_resized, 0.0, 1.0) * 255).astype(np.uint8)
 
-    h, w = original_rgb.shape[:2]
-    amap_resized = cv2.resize(amap_norm, (w, h), interpolation=cv2.INTER_LINEAR)
-
-    heatmap_bgr = cv2.applyColorMap(amap_resized, cv2.COLORMAP_JET)
+    heatmap_bgr = cv2.applyColorMap(amap_norm, cv2.COLORMAP_JET)
     original_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
     blended = cv2.addWeighted(original_bgr, 1.0 - alpha, heatmap_bgr, alpha, 0)
     blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
@@ -46,7 +86,11 @@ def generate_heatmap(
 
 
 def generate_segmentation(
-    anomaly_map: np.ndarray, original_rgb: np.ndarray, threshold: float
+    anomaly_map: np.ndarray,
+    original_rgb: np.ndarray,
+    threshold: float,
+    *,
+    transform: PreprocessTransform | None = None,
 ) -> bytes:
     """
     anomaly_map: float32 [1,1,H,W] or [H,W], already normalised to [0,1]
@@ -58,15 +102,14 @@ def generate_segmentation(
         threshold: Cut-off in [0,1] — pixels scoring above it are defects.
             Operates on the same normalised scale as the image-level pred_score,
             so the segmentation agrees with the OK/NOK Verdict.
+        transform: Preprocess transform used when the image was fed to the model.
 
     Returns:
         JPEG bytes of the original with red contours and a semi-transparent
         defect overlay.
     """
     amap = np.clip(anomaly_map.squeeze().astype(np.float32), 0.0, 1.0)
-
-    h, w = original_rgb.shape[:2]
-    amap_resized = cv2.resize(amap, (w, h), interpolation=cv2.INTER_LINEAR)
+    amap_resized = resize_anomaly_map_to_original(amap, transform, original_rgb)
 
     mask = (amap_resized > threshold).astype(np.uint8) * 255
 

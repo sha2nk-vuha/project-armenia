@@ -16,6 +16,7 @@ import type {
 interface Props {
   selectedSku: string;
   threshold: number;
+  letterboxOverlay: boolean;
   customerName: string;
   modelLoaded: boolean;
   features: FeatureInfo[];
@@ -45,6 +46,7 @@ interface Props {
   onFeatureChange: (feature: string) => void;
   onSkuChange: (sku: string) => void;
   onThresholdChange: (value: number) => void;
+  onLetterboxOverlayChange: (value: boolean) => void;
   onCustomerChange: (value: string) => void;
   onUploadDirectory: (files: FileList) => void;
   onRunAll: () => void;
@@ -54,6 +56,7 @@ interface Props {
 export function InferencePanel({
   selectedSku,
   threshold,
+  letterboxOverlay,
   customerName,
   modelLoaded,
   features,
@@ -83,12 +86,17 @@ export function InferencePanel({
   onFeatureChange,
   onSkuChange,
   onThresholdChange,
+  onLetterboxOverlayChange,
   onCustomerChange,
   onUploadDirectory,
   onRunAll,
   batchRunning,
 }: Props) {
   const canUpload = (isCascade || modelLoaded) && !!selectedSku;
+  const showLetterboxToggle =
+    activeFeature === "anomaly_detection" ||
+    (isCascade &&
+      (cascadeSpec?.stages.some((s) => s.feature === "anomaly_detection") ?? false));
 
   // `webkitdirectory`/`directory` are non-standard input attributes not present
   // in React's typings, so they're spread in as untyped props.
@@ -169,6 +177,27 @@ export function InferencePanel({
       ) : (
         <>
           <ThresholdControl value={threshold} onChange={onThresholdChange} label={thresholdLabel} />
+
+          {showLetterboxToggle && (
+            <div className="space-y-1">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={letterboxOverlay}
+                  onChange={(e) => onLetterboxOverlayChange(e.target.checked)}
+                  disabled={featureSwitching}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-yellow-500 focus:ring-yellow-400 disabled:opacity-50"
+                />
+                <span className="text-sm text-gray-700">
+                  Letterbox overlay alignment
+                  <span className="block text-[11px] text-gray-400 font-normal">
+                    Preserve aspect ratio when resizing to the model. Try this if
+                    heatmaps look shifted on non-square images.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
 
           <DecisionRuleControl
             rules={decisionRules}

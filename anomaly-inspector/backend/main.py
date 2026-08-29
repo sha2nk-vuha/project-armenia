@@ -11,6 +11,7 @@ from config import (
     CASCADE_FEATURE,
     DEFAULT_FEATURE,
     FEATURES,
+    LETTERBOX_OVERLAY_DEFAULT,
 )
 from database import crud
 from database.db import get_db, init_db
@@ -62,9 +63,21 @@ def _feature_catalog() -> list[dict]:
             "name": name,
             "label": spec["label"],
             "threshold_label": spec["threshold_label"],
+            **(
+                {"supports_letterbox_overlay": True}
+                if spec.get("supports_letterbox_overlay")
+                else {}
+            ),
         }
         for name, spec in FEATURES.items()
     ]
+
+
+def _form_bool(value: str, default: bool = False) -> bool:
+    """Parse a multipart form boolean; empty string keeps the default."""
+    if not value:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 @app.get("/api/status")
@@ -84,6 +97,9 @@ def get_status() -> dict:
         "active_feature": features.get_active_feature(),
         "features": catalog,
         "loaded_models": loaded,
+        "overlay_options": {
+            "letterbox_default": LETTERBOX_OVERLAY_DEFAULT,
+        },
     }
     if sess is None:
         return {**base, "model_loaded": False}
@@ -334,6 +350,7 @@ async def calibrate(
     images: list[UploadFile] = File(default=[]),
     decision_rule: str = Form(""),
     rule_params: str = Form(""),
+    letterbox: str = Form(""),
     db: Session = Depends(get_db),
 ) -> dict:
     """Teach a SKU's baseline from images known to be good.
@@ -353,6 +370,8 @@ async def calibrate(
         decision_rule: Rule to teach; empty selects the active default.
         rule_params: Optional JSON-object overrides for the run (e.g. class
             references that must be resolved).
+        letterbox: Letterbox flag for anomaly overlay alignment; empty uses the
+            server default.
 
     Returns:
         Dict with sku_name, decision_rule, taught params, sample_count,
@@ -391,12 +410,15 @@ async def calibrate(
         raise HTTPException(status_code=400, detail="Provide at least one calibration image.")
 
     overrides = _json_object_form(rule_params, "rule_params")
+    use_letterbox = _form_bool(letterbox, LETTERBOX_OVERLAY_DEFAULT)
 
     measured: list[float] = []
     skipped: list[str] = []
     for label, image_bytes in samples:
         try:
-            result = pipeline.infer(image_bytes, threshold, rule.name, overrides)
+            result = pipeline.infer(
+                image_bytes, threshold, rule.name, overrides, letterbox=use_letterbox
+            )
         except ClassNotFound as e:
             raise HTTPException(status_code=422, detail=str(e))
         except (ValueError, IndexError):
@@ -562,8 +584,15 @@ def _acquire_single_pipeline(
     return pipeline, record_params
 
 
-def _run_pipeline(pipeline, image_bytes: bytes, threshold: float,
-                  decision_rule: str | None, record_params: dict | None):
+def _run_pipeline(
+    pipeline,
+    image_bytes: bytes,
+    threshold: float,
+    decision_rule: str | None,
+    record_params: dict | None,
+    *,
+    letterbox: bool = False,
+):
     """Execute one inspection, mapping domain errors onto HTTP semantics.
 
     Args:
@@ -572,6 +601,8 @@ def _run_pipeline(pipeline, image_bytes: bytes, threshold: float,
         threshold: Threshold forwarded to the decision logic.
         decision_rule: Decision Rule name, or None for the pipeline default.
         record_params: Resolved rule params to forward; None skips overrides.
+        letterbox: When True, anomaly stages letterbox before inference so
+            overlays align on non-square images.
 
     Returns:
         The pipeline's InferenceResult.
@@ -582,7 +613,13 @@ def _run_pipeline(pipeline, image_bytes: bytes, threshold: float,
             match the active Feature.
     """
     try:
-        return pipeline.infer(image_bytes, threshold, decision_rule, record_params)
+        return pipeline.infer(
+            image_bytes,
+            threshold,
+            decision_rule,
+            record_params,
+            letterbox=letterbox,
+        )
     except ClassNotFound as e:
         # A rule param names a class the model's Class Catalog lacks — a
         # misconfiguration, and one that would otherwise judge the wrong object.
@@ -681,6 +718,7 @@ async def infer(
     decision_rule: str = Form(""),
     rule_params: str = Form(""),
     cascade_spec: str = Form(""),
+    letterbox: str = Form(""),
     image: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -700,6 +738,8 @@ async def infer(
             means none.
         cascade_spec: JSON-object describing the cascade stages; required
             when the Cascade Feature is active.
+        letterbox: When "true"/"1"/"yes", anomaly overlays use letterbox
+            resize; empty uses the server default from `LETTERBOX_OVERLAY`.
         image: Uploaded image file.
 
     Returns:
@@ -715,15 +755,25 @@ async def infer(
     # Image source: an uploaded file (folder images live in the browser).
     image_bytes = await image.read()
     _verify_image(image_bytes)
+    use_letterbox = _form_bool(letterbox, LETTERBOX_OVERLAY_DEFAULT)
 
     if is_cascade:
         pipeline, record_params = _acquire_cascade_pipeline(cascade_spec, sku_name, db)
-        result = _run_pipeline(pipeline, image_bytes, threshold, None, None)
+        result = _run_pipeline(
+            pipeline, image_bytes, threshold, None, None, letterbox=use_letterbox
+        )
     else:
         pipeline, record_params = _acquire_single_pipeline(
             db, sku_name, decision_rule, rule_params
         )
-        result = _run_pipeline(pipeline, image_bytes, threshold, decision_rule or None, record_params)
+        result = _run_pipeline(
+            pipeline,
+            image_bytes,
+            threshold,
+            decision_rule or None,
+            record_params,
+            letterbox=use_letterbox,
+        )
 
     crud.create_inspection(
         db,

@@ -86,7 +86,30 @@ def loaded_model(client):
 def test_status_no_model(client):
     resp = client.get("/api/status")
     assert resp.status_code == 200
-    assert resp.json()["model_loaded"] is False
+    body = resp.json()
+    assert body["model_loaded"] is False
+    assert body["overlay_options"]["letterbox_default"] is False
+    anomaly = next(f for f in body["features"] if f["name"] == "anomaly_detection")
+    assert anomaly["supports_letterbox_overlay"] is True
+
+
+def test_infer_honours_letterbox_flag(client, loaded_model):
+    captured: dict = {}
+
+    def _spy_preprocess(image_bytes, input_shape, letterbox=False):
+        captured["letterbox"] = letterbox
+        from inference.preprocessor import preprocess
+
+        return preprocess(image_bytes, input_shape, letterbox=letterbox)
+
+    with patch("inference.pipeline.preprocess", _spy_preprocess):
+        resp = client.post(
+            "/api/infer",
+            data={"sku_name": "SKU-X", "threshold": "0.5", "letterbox": "true"},
+            files={"image": ("test.png", _make_png_bytes(), "image/png")},
+        )
+    assert resp.status_code == 200
+    assert captured["letterbox"] is True
 
 
 def test_load_model_success(client, loaded_model):

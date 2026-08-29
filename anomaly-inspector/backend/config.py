@@ -37,6 +37,13 @@ SEGMENTATION_FEATURE = "segmentation"
 CASCADE_FEATURE = "cascade"
 DEFAULT_FEATURE = os.environ.get("DEFAULT_FEATURE", ANOMALY_FEATURE)
 
+# When True, anomaly preprocess scales uniformly and pads to model size so
+# heatmap/segmentation overlays align better on non-square images. Operators
+# can override per request from the GUI.
+LETTERBOX_OVERLAY_DEFAULT = os.environ.get(
+    "LETTERBOX_OVERLAY", "false"
+).lower() in ("1", "true", "yes", "on")
+
 # Per-Feature default model. `DEFAULT_MODEL_PATH`/`_VERSION` stay as the Anomaly
 # default for backward compatibility and feed the entry below.
 FEATURES: dict[str, dict] = {
@@ -45,6 +52,7 @@ FEATURES: dict[str, dict] = {
         "threshold_label": "Anomaly Threshold",
         "model_path": DEFAULT_MODEL_PATH,
         "model_version": DEFAULT_MODEL_VERSION,
+        "supports_letterbox_overlay": True,
     },
     PRESENCE_FEATURE: {
         "label": "Presence / Absence",

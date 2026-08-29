@@ -7,6 +7,7 @@ active pipeline and delegates to it, so it stays agnostic to which Feature is
 running and which rule is selected. See docs/adr/0002 and docs/adr/0005.
 """
 from dataclasses import dataclass, field
+import logging
 
 import numpy as np
 
@@ -36,6 +37,8 @@ from inference.visualizer import (
     generate_segmentation,
     render_annotations,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -284,6 +287,8 @@ class AnomalyPipeline(PipelineBase):
         threshold: float,
         rule_name: str | None = None,
         rule_params: dict | None = None,
+        *,
+        letterbox: bool = False,
     ) -> InferenceResult:
         """Run one Anomaly Detection inspection and return its envelope.
 
@@ -293,12 +298,41 @@ class AnomalyPipeline(PipelineBase):
             rule_name: Decision Rule to judge with; defaults to
                 anomaly_threshold.
             rule_params: Overrides layered over sidecar defaults.
+            letterbox: When True, scale uniformly and pad to model size before
+                inference so overlays align on non-square images.
 
         Returns:
             InferenceResult with heatmap/segmentation images and the Verdict.
         """
-        tensor, original_rgb = preprocess(image_bytes, self.model.input_shape)
+        tensor, original_rgb, transform = preprocess(
+            image_bytes, self.model.input_shape, letterbox=letterbox
+        )
         anomaly_map, pred_score = engine.run_inference_on(self.model, tensor)
+        map_h, map_w = anomaly_map.squeeze().shape
+        orig_h, orig_w = original_rgb.shape[:2]
+        model_h, model_w = self.model.input_shape
+        logger.info(
+            "Anomaly overlay shapes: original=%dx%d model=%dx%d map=%dx%d "
+            "letterbox=%s pad=(%d,%d)",
+            orig_h,
+            orig_w,
+            model_h,
+            model_w,
+            map_h,
+            map_w,
+            transform.letterboxed,
+            transform.pad_top,
+            transform.pad_left,
+        )
+        if (map_h, map_w) != (model_h, model_w):
+            logger.warning(
+                "Anomaly map resolution %dx%d differs from model input %dx%d; "
+                "overlay uses a two-step resize through model space",
+                map_h,
+                map_w,
+                model_h,
+                model_w,
+            )
         output = DecodedOutput(
             kinds=self.kinds,
             image_hw=original_rgb.shape[:2],
@@ -310,8 +344,12 @@ class AnomalyPipeline(PipelineBase):
         )
 
         images = {
-            "heatmap": generate_heatmap(anomaly_map, original_rgb),
-            "segmentation": generate_segmentation(anomaly_map, original_rgb, threshold),
+            "heatmap": generate_heatmap(
+                anomaly_map, original_rgb, transform=transform
+            ),
+            "segmentation": generate_segmentation(
+                anomaly_map, original_rgb, threshold, transform=transform
+            ),
         }
         if res.annotations:
             images["overlay"] = encode_jpeg(
@@ -361,6 +399,8 @@ class PresenceAbsencePipeline(PipelineBase):
         threshold: float,
         rule_name: str | None = None,
         rule_params: dict | None = None,
+        *,
+        letterbox: bool = False,
     ) -> InferenceResult:
         """Run one Presence/Absence inspection and return its envelope.
 
@@ -464,6 +504,8 @@ class SegmentationPipeline(PipelineBase):
         threshold: float,
         rule_name: str | None = None,
         rule_params: dict | None = None,
+        *,
+        letterbox: bool = False,
     ) -> InferenceResult:
         """Run one Segmentation inspection and return its envelope.
 
