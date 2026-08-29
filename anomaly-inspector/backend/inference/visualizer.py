@@ -40,8 +40,9 @@ def generate_heatmap(
     heatmap_bgr = cv2.applyColorMap(amap_resized, cv2.COLORMAP_JET)
     original_bgr = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR)
     blended = cv2.addWeighted(original_bgr, 1.0 - alpha, heatmap_bgr, alpha, 0)
+    blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
 
-    return encode_jpeg(blended)
+    return encode_jpeg(blended_rgb)
 
 
 def generate_segmentation(
@@ -76,8 +77,9 @@ def generate_segmentation(
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(result_bgr, contours, -1, (0, 0, 255), 2)
+    result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
-    return encode_jpeg(result_bgr)
+    return encode_jpeg(result_rgb)
 
 
 def render_annotations(base_rgb: np.ndarray, annotations: list) -> np.ndarray:
