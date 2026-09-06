@@ -37,5 +37,7 @@ from inference.decision.registry import (  # noqa: F401
 from inference.decision import (  # noqa: F401,E402
     anomaly_threshold,
     concentricity,
+    expected_and_forbidden,
     expected_classes,
+    forbidden_classes,
 )

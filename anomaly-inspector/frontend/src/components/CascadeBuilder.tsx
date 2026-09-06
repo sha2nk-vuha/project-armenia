@@ -174,7 +174,11 @@ export function CascadeBuilder({
                   disabled={disabled}
                   onChange={(e) => {
                     const nextRule = ruleOf(feat, e.target.value);
-                    setStage(i, { ...stage, rule: e.target.value, params: seedStageParams(nextRule) });
+                    // Seed defaults under the stage's existing params so a
+                    // previously-configured rule's selections survive toggling
+                    // back and forth. Unknown keys are ignored backend-side by
+                    // `resolve_params`, so they never leak into the verdict.
+                    setStage(i, { ...stage, rule: e.target.value, params: { ...seedStageParams(nextRule), ...stage.params } });
                   }}
                   className={selectClass}
                 >

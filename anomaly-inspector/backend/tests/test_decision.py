@@ -156,6 +156,78 @@ def test_expected_classes_rule_with_no_policy_passes_everything():
     assert res.verdict == "ok"
 
 
+def _combined_verdict(dets, expected, forbidden, threshold=0.5, labels=None):
+    out = DecodedOutput(
+        kinds=frozenset({KIND_DETECTIONS}),
+        image_hw=(10, 10),
+        detections=dets,
+    )
+    res = decision.get("expected_and_forbidden").evaluate(
+        _ctx(
+            out,
+            params={"expected_classes": expected, "forbidden_classes": forbidden},
+            labels=labels or {1: "gasket", 2: "impurity"},
+            threshold=threshold,
+        )
+    )
+    return res
+
+
+def _det(class_id, confidence):
+    return Detection(class_id, confidence, (0, 0, 5, 5))
+
+
+def test_combined_rule_ok_when_expected_present_and_forbidden_absent():
+    res = _combined_verdict([_det(1, 0.9)], ["gasket"], ["impurity"])
+    assert res.verdict == "ok"
+    assert res.metrics["missing"] == [] and res.metrics["found"] == []
+
+
+def test_combined_rule_nok_when_forbidden_present_despite_expected():
+    res = _combined_verdict([_det(1, 0.9), _det(2, 0.9)], ["gasket"], ["impurity"])
+    assert res.verdict == "not_ok"
+    assert res.metrics["found"] == ["impurity"]
+    assert "impurity" in res.reason
+
+
+def test_combined_rule_nok_when_expected_missing():
+    res = _combined_verdict([_det(2, 0.9)], ["gasket"], ["impurity"])
+    assert res.verdict == "not_ok"
+    assert res.metrics["missing"] == ["gasket"]
+
+
+def test_combined_rule_names_both_failure_sets():
+    res = _combined_verdict(
+        [_det(2, 0.9)], ["gasket", "cap"], ["impurity"],
+        labels={1: "gasket", 2: "impurity", 3: "cap"},
+    )
+    assert res.verdict == "not_ok"
+    assert "missing" in res.reason and "forbidden present" in res.reason
+
+
+def test_combined_rule_ignores_below_threshold_detections():
+    res = _combined_verdict([_det(1, 0.9), _det(2, 0.3)], ["gasket"], ["impurity"])
+    assert res.verdict == "ok"
+
+
+def test_combined_rule_with_no_policy_passes_everything():
+    res = _combined_verdict([], [], [])
+    assert res.verdict == "ok"
+
+
+def test_combined_rule_degrades_to_each_half():
+    # Empty Forbidden behaves like expected_classes; empty Expected like forbidden.
+    assert _combined_verdict([_det(1, 0.9)], ["gasket"], []).verdict == "ok"
+    assert _combined_verdict([], ["gasket"], []).verdict == "not_ok"
+    assert _combined_verdict([_det(2, 0.9)], [], ["impurity"]).verdict == "not_ok"
+    assert _combined_verdict([_det(1, 0.9)], [], ["impurity"]).verdict == "ok"
+
+
+def test_combined_rule_unknown_class_name_raises_loudly():
+    with pytest.raises(ClassNotFound, match="bottle_cap"):
+        _combined_verdict([_det(1, 0.9)], ["bottle_cap"], [])
+
+
 # ── Annotation rendering ────────────────────────────────────────────────────
 
 

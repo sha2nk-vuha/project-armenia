@@ -451,7 +451,7 @@ def test_presence_infer_overrides_expected_classes_from_request(client, presence
         files={"image": ("t.png", _make_png_bytes(), "image/png")},
     ).json()
 
-    assert body["decision_rule"] == "expected_classes"
+    assert body["decision_rule"] == "expected_and_forbidden"
     assert body["verdict"] == "not_ok"
     assert body["metrics"]["missing"] == ["no-gasket"]
 

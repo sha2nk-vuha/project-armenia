@@ -386,7 +386,12 @@ export default function App() {
     (name: string) => {
       const rule = decisionRules.find((r) => r.name === name);
       setSelectedRule(name);
-      setRuleParams(seedParams(rule ?? null));
+      // Seed the newly-selected rule's defaults *under* the current params so
+      // selections made under other rules survive toggling (e.g. expected +
+      // forbidden classes configured side by side). The backend's
+      // `resolve_params` ignores keys that don't belong to the active rule, so
+      // the inactive rule's keys never leak into a verdict.
+      setRuleParams((prev) => ({ ...seedParams(rule ?? null), ...prev }));
       setInferResult(null);
     },
     [decisionRules]

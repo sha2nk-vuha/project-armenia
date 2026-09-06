@@ -378,7 +378,7 @@ class PresenceAbsencePipeline(PipelineBase):
 
     feature = "presence_absence"
     kinds = frozenset({KIND_DETECTIONS})
-    default_rule = "expected_classes"
+    default_rule = "expected_and_forbidden"
 
     def __init__(self, model: ModelSession, config: ModelConfig):
         self.model = model
@@ -408,7 +408,7 @@ class PresenceAbsencePipeline(PipelineBase):
             image_bytes: Encoded image to inspect.
             threshold: Minimum detection confidence (the main slider).
             rule_name: Decision Rule to judge with; defaults to
-                expected_classes.
+                expected_and_forbidden.
             rule_params: Overrides layered over sidecar + SKU defaults.
 
         Returns:
